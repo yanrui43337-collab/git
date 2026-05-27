@@ -1,0 +1,30 @@
+# Claude Code
+.claude/
+
+# STM32CubeMX
+.mxproject
+
+# Keil MDK user-specific files
+*.uvguix.*
+
+# Keil build artifacts
+*.axf
+*.bin
+*.crf
+*.d
+*.dep
+*.hex
+*.htm
+*.lnp
+*.map
+*.o
+
+# Backup files
+*.Bak
+*.bak
+
+# Listing files
+*.lst
+
+# Build output directory
+MDK-ARM/qianrushi/
