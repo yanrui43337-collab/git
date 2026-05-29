@@ -256,13 +256,21 @@ void StartCommTask(void *argument)
               printf("📱 [蓝牙状态] 蓝牙已连接成功！\r\n");
           }
 
-          // === 解析自动指令 ===
+					// === 解析自动指令 ===
           if (strstr((char *)bt_rx_buf, "AUTO")) 
           {
               robot_mode = 1; 
               printf("🤖 收到切换自动模式指令! 准备爬楼...\r\n");
+              
+              // 🌟 终极防线：强制刹停手动模式下的电机，等待电磁尖峰消散！
+              // 彻底隔绝“手动切自动”带来的瞬间反电动势冲击！
+              extern void Motor_Contro2(int,int,int,int);
+              Motor_Contro2(0, 0, 0, 0); 
+              osDelay(500); 
+              
               osThreadResume(AutoClimbTaskHandle);   
           }
+					
           // === 解析摇杆数据 ===
           else if (strstr((char *)bt_rx_buf, "X:")) 
           {
@@ -274,12 +282,19 @@ void StartCommTask(void *argument)
               if ((p = strstr((char *)bt_rx_buf, "W:")) != NULL) cmd_w = atoi(p + 2);
               if ((p = strstr((char *)bt_rx_buf, "Z:")) != NULL) cmd_z = atoi(p + 2);
               
+							// 自动模式下检测到人为干预，强行打断
               if (robot_mode == 1) {
-                  if (abs(cmd_x) > 20 || abs(cmd_y) > 20 || abs(cmd_z) > 20) {
-                      printf("🛑 紧急打断：检测到人为干预，退出自动模式！\r\n");
+                  // 🌟 核心修复：大幅度拨动摇杆，或者收到全 0 的刹车指令（比如按了返回键），统统打断！
+                  if (abs(cmd_x) > 20 || abs(cmd_y) > 20 || abs(cmd_z) > 20 || 
+                     (cmd_x == 0 && cmd_y == 0 && cmd_w == 0 && cmd_z == 0)) 
+                  {
+                      printf("🛑 紧急打断：收到接管或返回指令，退出自动模式！\r\n");
                       osThreadSuspend(AutoClimbTaskHandle);  
+                      
                       extern void Motor_Contro2(int,int,int,int);
-                      Motor_Contro2(0, 0, 0, 0); 
+                      Motor_Contro2(0, 0, 0, 0); // 履带急刹车
+                      Emm_V5_Stop_Now(1, false); // 步进急刹车
+                      
                       int stop_z = 0;
                       osMessageQueuePut(StepperQueueHandle, &stop_z, 0, 0); 
                       robot_mode = 0; 
@@ -311,6 +326,7 @@ void StartCommTask(void *argument)
                   
                   extern void Motor_Contro2(int,int,int,int);
                   Motor_Contro2(0, 0, 0, 0); 
+								  Emm_V5_Stop_Now(1, false);
                   int stop_z = 0;
                   osMessageQueuePut(StepperQueueHandle, &stop_z, 0, 0); 
                   
@@ -333,12 +349,31 @@ void StartChassisTask(void *argument)
 {
   /* USER CODE BEGIN StartChassisTask */
   ChassisMsg_t rx_msg;
+  
+  // 🌟 新增：引入雷达的全局距离变量
+  extern int left_min;       
+  extern int right_min;      
+  
+  uint32_t last_print_time = 0; // 打印频率限速器
+
   for(;;)
   {		
       // 盯着传送带，拿到数据瞬间跑路
       if (osMessageQueueGet(ChassisQueueHandle, &rx_msg, NULL, osWaitForever) == osOK) 
       {
           Move_Mecanum(rx_msg.x, rx_msg.y, rx_msg.w);
+          
+          // 🌟 核心新增：如果检测到明显的左右横移指令（摇杆 X 轴拨动）
+          if (abs(rx_msg.x) > 10) 
+          {
+              // 每 500ms 打印一次，坚决防止单片机被串口刷死机
+              if (HAL_GetTick() - last_print_time > 200) 
+              {
+                  printf("🎮 [手动控制] 麦轮横移 (X=%d) | 雷达实时距离 -> 左侧:%d mm, 右侧:%d mm\r\n", 
+                         rx_msg.x, left_min, right_min);
+                  last_print_time = HAL_GetTick();
+              }
+          }
       }
   }
   /* USER CODE END StartChassisTask */
@@ -351,6 +386,7 @@ void StartChassisTask(void *argument)
 * @retval None
 */
 /* USER CODE END Header_StartStepperTask */
+
 void StartStepperTask(void *argument)
 {
   /* USER CODE BEGIN StartStepperTask */
@@ -359,8 +395,12 @@ void StartStepperTask(void *argument)
   bool is_stepper_stopped = true; 
   extern int robot_mode;          
   
-  #define MOTOR_MIN_LIMIT    0       
-  #define MOTOR_MAX_LIMIT    18000   
+  uint32_t last_uart_send_time = 0; 
+  uint32_t last_print_time = 0; // 🌟 打印频率控制器
+	uint32_t last_ultra_trig_time = 0; // 🌟 新增：超声波触发限速器
+  
+  #define MOTOR_MIN_LIMIT    -200000       
+  #define MOTOR_MAX_LIMIT    2028909 
 
   for(;;)
   {
@@ -379,21 +419,46 @@ void StartStepperTask(void *argument)
                   last_sent_z = 0;
               }
               if (robot_mode == 0) {
-                  int crawler_speed = target_z * 300; 
+                  int crawler_speed = target_z * 200; 
                   Motor_Contro2(crawler_speed, crawler_speed, crawler_speed, crawler_speed);
+									// =========================================================
+                  // 🌟 新增：手动模式下履带前进时，激活超声波并打印测距！
+                  // =========================================================
+                  // 1. 每 100ms 触发一次超声波（给足回声时间，防死机）
+                  if (HAL_GetTick() - last_ultra_trig_time > 100) {
+                      uint8_t trig_cmd[1] = {0xA0}; 
+                      extern UART_HandleTypeDef huart5;
+                      HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
+                      last_ultra_trig_time = HAL_GetTick();
+                  }
+									// 2. 每 500ms 打印一次距离（防止刷屏卡死）
+                  if (HAL_GetTick() - last_print_time > 500) {
+                      extern int Ultrasonic_Get_Distance(void);
+                      int dist = Ultrasonic_Get_Distance();
+                      printf("🎮 [履带手动前进] 超声波前方实时距离: %d mm\r\n", dist);
+                      last_print_time = HAL_GetTick();
+                  }
               }
           } 
           else {
               if (robot_mode == 0) Motor_Contro2(0, 0, 0, 0); 
               
-              if (is_stepper_stopped || abs(target_z - last_sent_z) > 5) {
-                  printf("🟢 步进任务: 执行【上升】指令 Z=%d，当前位置=%ld\r\n", target_z, step_motor_pos);
+              if (is_stepper_stopped || abs(target_z - last_sent_z) > 5 || (HAL_GetTick() - last_uart_send_time > 200)) 
+              {
+                  // 1. 播报实时位置 (500ms 一次，防刷屏)
+                  if (HAL_GetTick() - last_print_time > 500) {
+                      printf("🎮 [手动控制] 向上移动, Z=%d, 实时位置: %ld\r\n", target_z, step_motor_pos);
+                      last_print_time = HAL_GetTick();
+                  }
+                  
+                  // 2. 🚨 核心动作：真·油门指令！（你之前漏掉了这四句）
                   Emm_V5_Vel_Control(1, 0, target_z * 3, 50, false);
                   is_stepper_stopped = false;
                   last_sent_z = target_z;
+                  last_uart_send_time = HAL_GetTick();
               }
-          }
-      } 
+          } 
+      }
       // === 摇杆【向下】推 ===
       else if (target_z < -20) 
       { 
@@ -408,14 +473,22 @@ void StartStepperTask(void *argument)
               }
           } 
           else {
-              if (is_stepper_stopped || abs(target_z - last_sent_z) > 5) {
-                  printf("🔴 步进任务: 执行【下降】指令 Z=%d，当前位置=%ld\r\n", target_z, step_motor_pos);
+              if (is_stepper_stopped || abs(target_z - last_sent_z) > 5 || (HAL_GetTick() - last_uart_send_time > 200)) 
+              {
+                  // 1. 播报实时位置
+                  if (HAL_GetTick() - last_print_time > 500) {
+                      printf("🎮 [手动控制] 向下移动, Z=%d, 实时位置: %ld\r\n", target_z, step_motor_pos);
+                      last_print_time = HAL_GetTick();
+                  }
+                  
+                  // 2. 🚨 核心动作：真·油门指令！
                   Emm_V5_Vel_Control(1, 1, (-target_z) * 3, 50, false);
                   is_stepper_stopped = false;
                   last_sent_z = target_z;
+                  last_uart_send_time = HAL_GetTick();
               }
-          }
-      } 
+          } 
+      }
       // === 松开摇杆居中 ===
       else 
       { 
@@ -431,6 +504,8 @@ void StartStepperTask(void *argument)
   }
   /* USER CODE END StartStepperTask */
 }
+
+
 /* USER CODE BEGIN Header_StartAutoClimbTask */
 /**
 * @brief Function implementing the AutoClimbTask thread.
@@ -443,10 +518,10 @@ void StartAutoClimbTask(void *argument)
   /* USER CODE BEGIN StartAutoClimbTask */
   
   // 🎯 定义动作阈值 (方便你后续在实车上调参)
-  #define AUTO_TARGET_UP       18000   // 步进电机目标升高位置
-  #define AUTO_TARGET_DOWN     500     // 步进电机降落目标位置
-  #define ULTRA_STOP_DIST      150     // 超声波停止距离
-  #define LIDAR_STOP_DIST      200     // 雷达左右停止距离
+  #define AUTO_TARGET_UP       8000000   // 步进电机目标升高位置
+  #define AUTO_TARGET_DOWN     20     // 步进电机降落目标位置
+  #define ULTRA_STOP_DIST      200     // 超声波停止距离
+  #define LIDAR_STOP_DIST      400     // 雷达左右停止距离
   
   ChassisMsg_t msg_stop = {0, 0, 0};
   ChassisMsg_t msg_left = {0, 100, 0};   // 麦克纳姆轮左移
@@ -474,42 +549,96 @@ void StartAutoClimbTask(void *argument)
       stepper_cmd = 0;
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
 
+			// 🌟 核心修复点 1：步进电机刚停下，留出 200ms 让巨大的反电动势消散
+      osDelay(200);
+			
+			// 🌟 核心修复点 2：在履带起步前，不由分说，强行给超声波洗一次耳朵，防患于未然！
+      // 彻底清洗掉刚才步进电机上升几秒钟期间积攒的所有电磁垃圾标志！
+      extern UART_HandleTypeDef huart5;
+      extern uint8_t ultra_rx_buf[];
+      HAL_UART_AbortReceive(&huart5);
+      __HAL_UART_CLEAR_OREFLAG(&huart5);
+      __HAL_UART_CLEAR_NEFLAG(&huart5);
+      __HAL_UART_CLEAR_FEFLAG(&huart5);
+      HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16);
+			
 			// ==========================================================
       // 动作 2 & 3：Motor_Contro2 控制前进，直到超声波达到阈值
       // ==========================================================
       printf("➡️ 动作2: 履带/前轮开始前进(启用防断电软启动)...\r\n");
-      
-      // 🌟 核心修复 1：工业级大功率电机必须“软启动”！
-      // 防止瞬间满载导致主板电压跌落，把超声波模块给“饿”重启了！
-      for(int speed = 5000; speed <= 30000; speed += 5000) {
+
+      // 🌟 在起步前，先彻底清理 UART 状态，防止起步前就已经死锁
+      extern UART_HandleTypeDef huart5;
+      extern uint8_t ultra_rx_buf[]; 
+      HAL_UART_Abort(&huart5); // 💥 暴力重置 TX 和 RX
+      huart5.gState = HAL_UART_STATE_READY;  // 强行把嘴掰开
+      huart5.RxState = HAL_UART_STATE_READY; // 强行把耳朵扒开
+      HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16);
+
+      // 软启动加速的同时，同步让超声波开眼！
+      for(int speed = 3000; speed <= 12000; speed += 3000) {
           Motor_Contro2(speed, speed, speed, speed);
-//					uint8_t trig_cmd[1] = {0xA0}; 
-//					HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
-				
-          osDelay(30); // 每 30ms 加一点速度，丝滑起步
+          uint8_t trig_cmd[1] = {0xA0}; 
+          HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
+          osDelay(60); 
       }
       
       int current_dist = 0;
+      int ultra_lock_counter = 0; 
+      
       while (1) 
       { 
-          // 发送前清空一下串口，防止被电磁干扰的残渣卡住
-          __HAL_UART_CLEAR_OREFLAG(&huart5);
+          // 第一道防线：日常的软打断清理
+          if (huart5.RxState != HAL_UART_STATE_BUSY_RX || huart5.gState != HAL_UART_STATE_READY) {
+              HAL_UART_Abort(&huart5); 
+              huart5.gState = HAL_UART_STATE_READY;  
+              huart5.RxState = HAL_UART_STATE_READY; 
+              HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16); 
+          }
           
           uint8_t trig_cmd[1] = {0xA0}; 
-          HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
+          HAL_UART_Transmit(&huart5, trig_cmd, 1, 50); 
           
-          osDelay(60); // 🌟 稍微多给超声波 10ms 的回声等待时间
+          osDelay(60); // 给足 60ms 回声时间
 
           current_dist = Ultrasonic_Get_Distance();
           printf("👀 [超声波监控] 当前前方距离: %d mm\r\n", current_dist);
           
-          if (current_dist > 0 && current_dist <= ULTRA_STOP_DIST) {
-              printf("🛑 触发避障！距离达标(%d mm)，紧急刹车！\r\n", current_dist);
-              break; 
+          if (current_dist > 0) {
+              ultra_lock_counter = 0; 
+              if (current_dist <= ULTRA_STOP_DIST) {
+                  printf("🛑 触发避障！距离达标(%d mm)，紧急刹车！\r\n", current_dist);
+                  break; 
+              }
+          }
+          else {
+              ultra_lock_counter++;
+              if (ultra_lock_counter >= 3) {
+                  printf("⚠️ [安全警报] 传感器失联！盲开危险，立刻紧急停车！\r\n");
+                  Motor_Contro2(0, 0, 0, 0);
+                  osDelay(200);
+
+                  // 🌟 终极防线：【核弹级】硅片硬件重置！
+                  // 既然修不好，就直接把硬件掐电销毁，再重新初始化！绝对 100% 治好死锁！
+                  printf("🔧 正在执行【核弹级】硅片重置 (DeInit/Init)...\r\n");
+                  extern void MX_UART5_Init(void); // 引用 main.c 的初始化函数
+                  HAL_UART_DeInit(&huart5);        // 彻底摧毁 UART5 硬件配置
+                  MX_UART5_Init();                 // 重新给 UART5 通电并初始化！
+                  HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16); 
+                  
+                  printf("🚀 链路重置完成，履带重新软启动前进！\r\n");
+                  for(int speed = 5000; speed <= 15000; speed += 5000) {
+                      Motor_Contro2(speed, speed, speed, speed);
+                      HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
+                      osDelay(60); 
+                  }
+
+                  ultra_lock_counter = 0; 
+              }
           }
       }
       Motor_Contro2(0, 0, 0, 0); 
-      osDelay(500); // 刹车同样需要 0.5 秒消散反电动势
+      osDelay(500);
 			
       // ==========================================================
       // 动作 4：步进电机顺时针旋转，回到原位置 (下降)
@@ -631,9 +760,9 @@ void StartSensorTask(void *argument)
           left_min  = Lidar_Get_Min_Distance_In_Range(260, 280); // 左侧 270度 附近
           right_min = Lidar_Get_Min_Distance_In_Range(80, 100);  // 右侧 90度 附近
 
-          // 🌟 核心修复 3：如你所愿，自动模式不发点云省算力！只在手动模式(robot_mode == 0)时才发！
+          // 🌟 核心修复 3：如你所愿，手动模式不发点云省算力！只在手动模式(robot_mode == 0)时才发！
 					extern int robot_mode; 
-          if (robot_mode == 0 && (HAL_GetTick() - last_send_time > 100)) 
+          if (robot_mode == 1 && (HAL_GetTick() - last_send_time > 100)) 
           {
               Compress_And_Send_Lidar_Data();
               last_send_time = HAL_GetTick(); 
@@ -645,18 +774,19 @@ void StartSensorTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
 // 🌟 终极版：HAL库官方错误回调函数（专治一切电磁干扰导致的死锁）
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART3)
     {
-        __HAL_UART_CLEAR_OREFLAG(huart); // 清除追尾
-        __HAL_UART_CLEAR_FEFLAG(huart);  // 清除帧错误
-        __HAL_UART_CLEAR_NEFLAG(huart);  // 🌟 核心：清除电机下降时产生的噪声错误！
-        __HAL_UART_CLEAR_PEFLAG(huart);  // 清除奇偶校验错误
+        __HAL_UART_CLEAR_OREFLAG(huart); 
+        __HAL_UART_CLEAR_FEFLAG(huart);  
+        __HAL_UART_CLEAR_NEFLAG(huart);  
+        __HAL_UART_CLEAR_PEFLAG(huart);  
         
         extern uint8_t rxCmd[];
-        HAL_UARTEx_ReceiveToIdle_IT(&huart3, rxCmd, 128); // 满血复活
+        HAL_UARTEx_ReceiveToIdle_IT(&huart3, rxCmd, 128); 
     }
     else if (huart->Instance == UART5)
     {
@@ -668,6 +798,17 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         extern uint8_t ultra_rx_buf[];
         HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16);
     }
+    // 👇 新增：给蓝牙(UART4)也颁发“不死金牌”！防止任何开机乱码导致死锁！
+    else if (huart->Instance == UART4)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        
+        extern uint8_t bt_rx_buf[];
+        HAL_UARTEx_ReceiveToIdle_IT(&huart4, bt_rx_buf, 64);
+    }
 }
-/* USER CODE END Application */
 
+/* USER CODE END Application */
