@@ -353,16 +353,24 @@ void StartChassisTask(void *argument)
   // 🌟 新增：引入雷达的全局距离变量
   extern int left_min;       
   extern int right_min;      
+	
+  // 🌟 新增：手动模式底盘限速系数（0.0 ~ 1.0），数字越小速度越慢
+  const float CHASSIS_SPEED_SCALE = 0.4f;
   
-  uint32_t last_print_time = 0; // 打印频率限速器
+	uint32_t last_print_time = 0; // 打印频率限速器
 
   for(;;)
   {		
       // 盯着传送带，拿到数据瞬间跑路
       if (osMessageQueueGet(ChassisQueueHandle, &rx_msg, NULL, osWaitForever) == osOK) 
       {
-          Move_Mecanum(rx_msg.x, rx_msg.y, rx_msg.w);
+				
+          // 🌟 修改：将摇杆原始输入乘以限速系数后再传给底盘控制函数
+          int target_x = (int)(rx_msg.x * CHASSIS_SPEED_SCALE);
+          int target_y = (int)(rx_msg.y * CHASSIS_SPEED_SCALE);
+          int target_w = (int)(rx_msg.w * CHASSIS_SPEED_SCALE);
           
+          Move_Mecanum(target_x, target_y, target_w);
           // 🌟 核心新增：如果检测到明显的左右横移指令（摇杆 X 轴拨动）
           if (abs(rx_msg.x) > 10) 
           {
@@ -419,7 +427,7 @@ void StartStepperTask(void *argument)
                   last_sent_z = 0;
               }
               if (robot_mode == 0) {
-                  int crawler_speed = target_z * 200; 
+                  int crawler_speed = target_z * 500; 
                   Motor_Contro2(crawler_speed, crawler_speed, crawler_speed, crawler_speed);
 									// =========================================================
                   // 🌟 新增：手动模式下履带前进时，激活超声波并打印测距！
@@ -518,8 +526,8 @@ void StartAutoClimbTask(void *argument)
   /* USER CODE BEGIN StartAutoClimbTask */
   
   // 🎯 定义动作阈值 (方便你后续在实车上调参)
-  #define AUTO_TARGET_UP       8000000   // 步进电机目标升高位置
-  #define AUTO_TARGET_DOWN     20     // 步进电机降落目标位置
+  #define AUTO_TARGET_UP       2028909   // 步进电机目标升高位置
+  #define AUTO_TARGET_DOWN     0     // 步进电机降落目标位置
   #define ULTRA_STOP_DIST      200     // 超声波停止距离
   #define LIDAR_STOP_DIST      400     // 雷达左右停止距离
   
@@ -537,7 +545,7 @@ void StartAutoClimbTask(void *argument)
       // 动作 1：步进电机逆时针旋转，升高到设定位置
       // ==========================================================
       printf("➡️ 动作1: 步进电机上升中...\r\n");
-      stepper_cmd = 100; 
+      stepper_cmd = 60; 
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
       
       // 🌟 监控升级：每 100ms 打印一次实时位置！
@@ -632,7 +640,6 @@ void StartAutoClimbTask(void *argument)
                       HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
                       osDelay(60); 
                   }
-
                   ultra_lock_counter = 0; 
               }
           }
@@ -644,7 +651,7 @@ void StartAutoClimbTask(void *argument)
       // 动作 4：步进电机顺时针旋转，回到原位置 (下降)
       // ==========================================================
       printf("➡️ 动作4: 步进电机下降中...\r\n");
-      stepper_cmd = -100; 
+      stepper_cmd = -60; 
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
       
       // 🌟 监控升级：每 100ms 打印一次实时位置！
@@ -808,6 +815,15 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         
         extern uint8_t bt_rx_buf[];
         HAL_UARTEx_ReceiveToIdle_IT(&huart4, bt_rx_buf, 64);
+    }
+		// 👇 新增：给雷达 (USART2) 颁发不死金牌
+		else if (huart->Instance == USART2)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        // 注意：因为是 Circular DMA，这里不需要重启接收，清掉标志位让它继续跑就行
     }
 }
 

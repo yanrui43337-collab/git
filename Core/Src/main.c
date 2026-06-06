@@ -226,6 +226,8 @@ int main(void)
 		//雷达
 		Lidar_Init();
 		
+		// 确保在 while(1) 之前，敲响一次雷达的 DMA 接收！
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
 		
 		// =======================================================
 		// 🌟 步进电机终极安全初始化序列 (闭环防暴走版) 🌟
@@ -418,7 +420,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
             osSemaphoreRelease(Sem_SensorRxHandle); 
         }
 			
-        HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
+      //  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
     }
 		
 		// === 3. 手机蓝牙 (UART4) -> 敲蓝牙的门铃 ===
