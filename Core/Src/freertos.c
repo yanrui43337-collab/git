@@ -535,14 +535,15 @@ void StartAutoClimbTask(void *argument)
   /* USER CODE BEGIN StartAutoClimbTask */
   
   // 🎯 基础动作阈值
-  #define AUTO_TARGET_UP       2028909   // 步进电机目标升高位置 
-  #define AUTO_TARGET_DOWN     20        // 步进电机降落目标位置
-  #define ULTRA_STOP_DIST      30        // 正常爬楼时的超声波停止距离
-  #define LIDAR_STOP_DIST      220       // 雷达左右停止距离
+  #define AUTO_TARGET_UP       2098909   // 步进电机目标升高位置 
+  #define AUTO_TARGET_DOWN     -12000       // 步进电机降落目标位置
+  #define ULTRA_STOP_DIST      40        // 正常爬楼时的超声波停止距离
+  #define ULTRA_STEP_FWD_DIST  110       // 🌟 新增 动作2：单级台阶上，允许步进电机下降的安全超声波距离
+	#define LIDAR_STOP_DIST      300       // 雷达左右停止距离
   
 // 🌟 核心修正：平台物理阈值 (DETECT 必定大于 LIMIT)
   #define ULTRA_PLATFORM_DETECT  1700      // 判定登顶距离 (平台深度 + 台阶宽度，需实测)
-  #define ULTRA_LAST_STEP_DIST   1830      // 🌟 新增：后轮完全登上最后一个台阶的超声波闭环目标值
+  #define ULTRA_LAST_STEP_DIST   1720      // 🌟 新增：后轮完全登上最后一个台阶的超声波闭环目标值
   #define ULTRA_PLATFORM_LIMIT   890       // 平台扫地倒车最大极限 (平台深度 - 尾部防跌落余量，需实测)
   
   #define ULTRA_WALL_MIN_DIST    210       // 平台前进清扫时，离前墙的最小极限距离
@@ -558,8 +559,8 @@ void StartAutoClimbTask(void *argument)
   ChassisMsg_t msg_stop  = {0, 0, 0};
   ChassisMsg_t msg_fwd   = {50, 0, 0};   // 麦轮前进 (降速)
   ChassisMsg_t msg_rev   = {-50, 0, 0};  // 麦轮后退 (降速)
-  ChassisMsg_t msg_left  = {0, 60, 0};   // 麦轮左移 (降速)
-  ChassisMsg_t msg_right = {0, -60, 0};  // 麦轮右移 (降速)
+  ChassisMsg_t msg_left  = {0, -60, 0};   // 麦轮左移 (降速)
+  ChassisMsg_t msg_right = {0, 60, 0};  // 麦轮右移 (降速)
   
   int stepper_cmd = 0; 
   extern uint16_t Lidar_Get_Min_Distance_In_Range(uint16_t start_angle, uint16_t end_angle);
@@ -915,7 +916,7 @@ for(;;)
           
           if (current_dist > 0) {
               ultra_lock_counter = 0; 
-              if (current_dist <= ULTRA_STOP_DIST) {
+              if (current_dist <= ULTRA_STEP_FWD_DIST) {
                   printf("🛑 触发避障！距离达标(%d mm)，紧急刹车！\r\n", current_dist);
                   break; 
               }
@@ -963,7 +964,57 @@ for(;;)
       
       stepper_cmd = 0;
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
+      osDelay(300); // 停顿一下让车身稳住
 
+      // 👇👇👇 🌟 核心新增：动作 4.5 步进收腿后，先直行贴近下一层台阶 👇👇👇
+      // ==========================================================
+      // 动作 4.5：麦轮直行，直到距离前墙满足 ULTRA_STOP_DIST
+      // ==========================================================
+      printf("➡️ 动作4.5: 麦轮直行贴近下一层台阶，准备左右对中...\r\n");
+      
+      // 清理 UART 状态，防止超声波死锁
+      if (huart5.RxState != HAL_UART_STATE_BUSY_RX || huart5.gState != HAL_UART_STATE_READY) {
+          HAL_UART_Abort(&huart5); 
+          huart5.gState = HAL_UART_STATE_READY;  
+          huart5.RxState = HAL_UART_STATE_READY; 
+          HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16); 
+      }
+      
+      osMessageQueuePut(ChassisQueueHandle, &msg_fwd, 0, 0); // 麦轮前进
+      int post_step_lock_counter = 0; 
+      
+      while (1) {
+          uint8_t trig_cmd[1] = {0xA0}; 
+          HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
+          osDelay(60); 
+          
+          int dist = Ultrasonic_Get_Distance();
+          printf("👀 [贴墙寻迹] 当前前方距离: %d mm (目标 <= %d mm)\r\n", dist, ULTRA_STOP_DIST);
+          
+          if (dist > 0) {
+              post_step_lock_counter = 0;
+              if (dist <= ULTRA_STOP_DIST) {
+                  printf("🛑 触达下一层起跳点(%d mm)！停止直行，开始左右扫平！\r\n", dist);
+                  break; 
+              }
+          } else {
+              post_step_lock_counter++;
+              if (post_step_lock_counter >= 5) {
+                  printf("⚠️ [安全警报] 贴墙寻迹时超声波失联！强制刹停！\r\n");
+                  osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+                  osDelay(200);
+                  extern int robot_mode;
+                  robot_mode = 0; 
+                  osThreadSuspend(AutoClimbTaskHandle); 
+              }
+          }
+      }
+      
+      osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+      osDelay(500); // 刹车停稳，为精确的左右雷达测距做准备
+      // 👆👆👆 核心新增结束 👆👆👆
+			
+			
       // ==========================================================
       // 动作 5 & 6：麦轮控制左移，直到雷达左侧达到阈值
       // ==========================================================
@@ -1129,3 +1180,4 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 /* USER CODE END Application */
+
