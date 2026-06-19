@@ -3,48 +3,90 @@
 #include "bmi270_port.h"
 #include "stdio.h"
 
-// ¼ÓÉÏ static£¬ÈÃÕâÐ©±äÁ¿±ä³ÉÕâ¸öÎÄ¼þµÄ¡°Ë½ÓÐ²Æ²ú¡±£¬¾ø¶Ô²»»áºÍ main.c ³åÍ»
+// åŠ ä¸Š staticï¼Œè®©è¿™äº›å˜é‡å˜æˆè¿™ä¸ªæ–‡ä»¶çš„â€œç§æœ‰è´¢äº§â€ï¼Œç»å¯¹ä¸ä¼šå’Œ main.c å†²çª
 static struct bmi2_dev bmi270_dev;
 static struct bmi2_sens_data sensor_data;
 static uint8_t dev_addr = 0x68; 
 
+// å£°æ˜Žå¤–éƒ¨çš„å»¶æ—¶å‡½æ•°ï¼ˆå®ƒé™é™åœ°èººåœ¨å•†å®¶çš„ bmi270_port.c é‡Œï¼‰
+extern void bmi2_delay_us(uint32_t period, void *intf_ptr);
+
 // ==========================================
-// ÍÓÂÝÒÇ³õÊ¼»¯Ä£¿é
+// é™€èžºä»ªåˆå§‹åŒ–æ¨¡å—
 // ==========================================
 int8_t Tuoluo_Init(void) {
     bmi270_dev.intf = BMI2_I2C_INTF;
     bmi270_dev.read = bmi2_i2c_read;
-    bmi270_dev.write = bmi2_i2c_write;
-    bmi270_dev.delay_us = bmi2_delay_us;
+    bmi270_dev.write = bmi2_i2c_write; 
+    
+    // ç›´æŽ¥æŒ‚è½½å¤–éƒ¨å·²ç»å†™å¥½çš„å»¶æ—¶å‡½æ•°
+    bmi270_dev.delay_us = bmi2_delay_us; 
+    
     bmi270_dev.intf_ptr = &dev_addr;
-    bmi270_dev.read_write_len = 32; 
+    
+    // I2C å•æ¬¡æœ€å¤§ä¼ è¾“é•¿åº¦è®¾ä¸º 128
+    bmi270_dev.read_write_len = 128; 
     bmi270_dev.config_file_ptr = NULL;
 
+    // 1. åˆå§‹åŒ–å¹¶åŠ è½½å¾®ç 
     int8_t rslt = bmi270_init(&bmi270_dev);
+    
     if (rslt == BMI2_OK) {
         printf("IMU Init OK!\r\n");
-        // Ö»ÓÐ³õÊ¼»¯³É¹¦ÁË£¬²Å¿ªÆô´«¸ÐÆ÷
+        
+        // 2. å¼€å¯ä¼ æ„Ÿå™¨
         uint8_t sens_list[2] = {BMI2_ACCEL, BMI2_GYRO};
-        bmi2_sensor_enable(sens_list, 2, &bmi270_dev);
+        rslt = bmi2_sensor_enable(sens_list, 2, &bmi270_dev);
+        
+        // 3. é…ç½®ä¼ æ„Ÿå™¨å‚æ•°
+        if (rslt == BMI2_OK) {
+            struct bmi2_sens_config config[2];
+
+            // --- åŠ é€Ÿåº¦è®¡é…ç½® ---
+            config[0].type = BMI2_ACCEL;
+            config[0].cfg.acc.odr = BMI2_ACC_ODR_200HZ;        
+            config[0].cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;      
+            config[0].cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+            config[0].cfg.acc.range = BMI2_ACC_RANGE_8G;       // +-8G -> 4096 LSB/g
+
+            // --- é™€èžºä»ªé…ç½® ---
+            config[1].type = BMI2_GYRO;
+            config[1].cfg.gyr.odr = BMI2_GYR_ODR_200HZ;        
+            config[1].cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;      
+            config[1].cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE;
+            config[1].cfg.gyr.ois_range = BMI2_GYR_OIS_250;    
+            config[1].cfg.gyr.range = BMI2_GYR_RANGE_2000;     // +-2000dps -> 16.384 LSB/dps
+            config[1].cfg.gyr.noise_perf = BMI2_PERF_OPT_MODE; 
+
+            rslt = bmi270_set_sensor_config(config, 2, &bmi270_dev);
+            if (rslt == BMI2_OK) {
+                printf("IMU Config OK! Sensor is running.\r\n");
+            } else {
+                printf("IMU Config Fail! Error: %d\r\n", rslt);
+            }
+        } else {
+            printf("IMU Enable Fail! Error: %d\r\n", rslt);
+        }
     } else {
         printf("IMU Init Fail! Error: %d\r\n", rslt);
     }
+    
     return rslt;
 }
 
 // ==========================================
-// ÍÓÂÝÒÇ¶ÁÈ¡ÓëÎïÀíµ¥Î»»»ËãÄ£¿é
+// é™€èžºä»ªè¯»å–ä¸Žç‰©ç†å•ä½æ¢ç®—æ¨¡å—
 // ==========================================
 void Tuoluo_Read(Tuoluo_Data_t *data) {
     int8_t rslt = bmi2_get_sensor_data(&sensor_data, &bmi270_dev);
     
     if (rslt == BMI2_OK) {
-        // ¼ÓËÙ¶È»»Ëã£ºÄ¬ÈÏÁ¿³Ì+-8g£¬³ýÒÔ 4096.0f
+        // åŠ é€Ÿåº¦æ¢ç®— (å•ä½: g)
         data->Acc_X = sensor_data.acc.x / 4096.0f;
         data->Acc_Y = sensor_data.acc.y / 4096.0f;
         data->Acc_Z = sensor_data.acc.z / 4096.0f;
         
-        // ½ÇËÙ¶È»»Ëã£ºÄ¬ÈÏÁ¿³Ì+-2000dps£¬³ýÒÔ 16.384f
+        // è§’é€Ÿåº¦æ¢ç®— (å•ä½: dps åº¦æ¯ç§’)
         data->Gyro_X = sensor_data.gyr.x / 16.384f;
         data->Gyro_Y = sensor_data.gyr.y / 16.384f;
         data->Gyro_Z = sensor_data.gyr.z / 16.384f;

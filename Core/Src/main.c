@@ -67,15 +67,6 @@ volatile uint32_t motor_update_count = 0;
 
 /* USER CODE END PV */
 
-// 在 main.c 的 PRIVATE VARIABLES 区
-#if defined ( __ICCARM__ )
-#pragma location = 0x30000000 // 或者其他非 Cacheable 的 SRAM 区域
-uint8_t rxCmd[128];
-#else
-// 使用 GCC 定义，确保在 linker script 中这块内存被标记为 Non-Cacheable
-uint8_t rxCmd[128] __attribute__((section(".noncacheable"))) __attribute__((aligned(32))); 
-#endif
-
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MPU_Config(void);
@@ -118,12 +109,14 @@ uint16_t obj_x, obj_y, obj_w, obj_h;
 Tuoluo_Data_t my_robot_imu; // 声明一个结构体变量，用来接数据
 
 /* USER CODE END 0 */
+
 /**
   * @brief  The application entry point.
   * @retval int
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 		
   /* USER CODE END 1 */
@@ -370,6 +363,16 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         extern volatile int32_t step_motor_pos; 
         extern volatile uint32_t motor_update_count;
         
+//				// 👇👇👇 🌟 新增：暴力抓包打印！看看底层到底收到了啥！ 👇👇👇
+//        printf("📦 [USART3 抓包] 长度: %d, 内容: ", Size);
+//        for(int k = 0; k < Size; k++)
+//				{
+//            printf("%02X ", rxCmd[k]);
+//        }
+//        printf("\r\n");
+//        // 👆👆👆 ===================================================
+			
+			
         // 🌟 核心修复 1：完整数据包包含方向位，至少需要 8 个字节！
         if (Size >= 8) 
         {

@@ -6,7 +6,7 @@
 int8_t bmi2_i2c_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr) {
     uint8_t dev_addr = *(uint8_t*)intf_ptr;
     
-    if (HAL_I2C_Mem_Read(&hi2c1, (dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT, reg_data, len, 100) != HAL_OK) {
+    if (HAL_I2C_Mem_Read(&hi2c1, (dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT, reg_data, len, HAL_MAX_DELAY) != HAL_OK) {
         return BMI2_E_COM_FAIL;
     }
     return BMI2_OK;
@@ -16,7 +16,7 @@ int8_t bmi2_i2c_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *in
 int8_t bmi2_i2c_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr) {
     uint8_t dev_addr = *(uint8_t*)intf_ptr;
     
-    if (HAL_I2C_Mem_Write(&hi2c1, (dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT, (uint8_t*)reg_data, len, 100) != HAL_OK) {
+    if (HAL_I2C_Mem_Write(&hi2c1, (dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT, (uint8_t*)reg_data, len, HAL_MAX_DELAY) != HAL_OK) {
         return BMI2_E_COM_FAIL;
     }
     return BMI2_OK;
