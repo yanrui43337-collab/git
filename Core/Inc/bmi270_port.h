@@ -1,20 +1,20 @@
 #ifndef __BMI270_PORT_H__
 #define __BMI270_PORT_H__
 
-/* ÒıÈë±ê×¼ÕûÊıÀàĞÍ¶¨Òå (Èç uint8_t, int8_t µÈ) */
+/* å¼•å…¥æ ‡å‡†æ•´æ•°ç±»å‹å®šä¹‰ (å¦‚ uint8_t, int8_t ç­‰) */
 #include <stdint.h>
 
 /* ========================================================= */
-/* µ×²ãÇÅ½Óº¯ÊıÉùÃ÷                        */
+/* åº•å±‚æ¡¥æ¥å‡½æ•°å£°æ˜                        */
 /* ========================================================= */
 
-/* I2C ¶Áº¯Êı½Ó¿Ú·â×° */
+/* I2C è¯»å‡½æ•°æ¥å£å°è£… */
 int8_t bmi2_i2c_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
 
-/* I2C Ğ´º¯Êı½Ó¿Ú·â×° */
+/* I2C å†™å‡½æ•°æ¥å£å°è£… */
 int8_t bmi2_i2c_write(uint8_t reg_addr, const uint8_t *reg_data, uint32_t len, void *intf_ptr);
 
-/* Î¢Ãë¼¶ÑÓÊ±½Ó¿Ú·â×° */
+/* å¾®ç§’çº§å»¶æ—¶æ¥å£å°è£… */
 void bmi2_delay_us(uint32_t period, void *intf_ptr);
 
 #endif /* __BMI270_PORT_H__ */

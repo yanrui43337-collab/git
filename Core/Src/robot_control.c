@@ -37,9 +37,6 @@ float actual_rpm_m2 ;
 float actual_rpm_m3 ;
 float actual_rpm_m4 ;
 
-
-
-
 typedef enum {
     STATE_FIND_WALL = 0,    // 寻找墙壁（向左平移）
     STATE_CLIMB_UP = 1,     // 遇到墙壁，步进电机爬升
@@ -50,7 +47,6 @@ typedef enum {
 
 RobotState_t current_state = STATE_FIND_WALL;
 
-
 extern int left_min;
 extern int right_min;
 extern int front_min;
@@ -59,15 +55,15 @@ extern int front_min;
  * 全局状态变量实体化
  * 初始化为：上次距离9999，计数器0，无嫌疑0
  * ==================================================================== */
+
 DynamicObstacleState left_state  = {9999, 0, 0};
 DynamicObstacleState right_state = {9999, 0, 0};
-
-
 
 /* ====================================================================
  * 算法 1：雷达动态障碍物(人腿)检测
  * 返回值： 1 -> 是突然闯入的人腿；  0 -> 是墙壁、扶手等固定物，或者没障碍
  * ==================================================================== */
+
 int Check_Sudden_Obstacle(int current_min, DynamicObstacleState *state) {
     int ALERT_DIST = 200;  // 危险距离阈值：200mm (20cm)
     int JUMP_THRES = 200;  // 突变落差阈值：瞬间缩短200mm以上

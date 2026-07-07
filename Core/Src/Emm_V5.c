@@ -194,7 +194,9 @@ void Emm_V5_Stop_Now(uint8_t addr, bool snF)
   cmd[4] =  0x6B;                       // 校验字节
   
   // 发送命令
-  HAL_UART_Transmit_DMA(&huart3, (uint8_t *)cmd, 5);
+  extern UART_HandleTypeDef huart3;
+  HAL_UART_AbortTransmit(&huart3); 
+  HAL_UART_Transmit(&huart3, (uint8_t *)cmd, 5, 100);
 }
 
 /**

@@ -91,4 +91,8 @@ void Tuoluo_Read(Tuoluo_Data_t *data) {
         data->Gyro_Y = sensor_data.gyr.y / 16.384f;
         data->Gyro_Z = sensor_data.gyr.z / 16.384f;
     }
+		else
+		{
+			printf("❌ IMU读取失败! 错误码: %d\r\n", rslt);
+		}
 }

@@ -363,16 +363,6 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         extern volatile int32_t step_motor_pos; 
         extern volatile uint32_t motor_update_count;
         
-//				// 👇👇👇 🌟 新增：暴力抓包打印！看看底层到底收到了啥！ 👇👇👇
-//        printf("📦 [USART3 抓包] 长度: %d, 内容: ", Size);
-//        for(int k = 0; k < Size; k++)
-//				{
-//            printf("%02X ", rxCmd[k]);
-//        }
-//        printf("\r\n");
-//        // 👆👆👆 ===================================================
-			
-			
         // 🌟 核心修复 1：完整数据包包含方向位，至少需要 8 个字节！
         if (Size >= 8) 
         {

@@ -77,6 +77,58 @@ typedef struct {
     int w;
 } ChassisMsg_t;
 
+
+
+/* USER CODE BEGIN FunctionPrototypes */
+// 🌟 终极安全机制：带主动位置探测的防滑行刹车
+// 🌟 终极安全机制：带主动位置探测的防滑行刹车
+void Safe_Stepper_Stop(void) 
+{
+    // 👇 就是加了这一句，告诉编译器这个变量在下面定义了，放心用！
+    extern osMessageQueueId_t StepperQueueHandle; 
+    
+    int stop_cmd_val = 0;
+    int32_t last_pos = step_motor_pos; // 初始赋值
+    int static_count = 0;
+
+    printf("\r\n🛑 [安全机制] 触发绝对刹车指令，准备校验丝杆静止状态...\r\n");
+
+    while (1) 
+    {
+        // 1. 同步清零队列，防止之前堆积的命令捣乱
+        osMessageQueuePut(StepperQueueHandle, &stop_cmd_val, 0, 0);
+
+        // 2. 硬件级强发刹车（打断可能正在发送的轮询）
+        Emm_V5_Stop_Now(1, false);
+
+        // 3. 延时 40ms：给电机减速时间
+        osDelay(40); 
+
+        // 4. 强行主动发送位置读取指令，防假死！
+        Emm_V5_Read_Sys_Params(1, S_CPOS);
+
+        // 5. 延时 10ms：等待驱动器回复数据更新 step_motor_pos
+        osDelay(10); 
+
+        // 6. 严苛判定
+        if (step_motor_pos == last_pos) {
+            static_count++;
+            // 连续两次 (100ms) 位置分毫不差，确认为物理抱死
+            if (static_count >= 2) {
+                printf("✅ [安全机制] 步进电机已彻底物理停稳！最终安全坐标: %ld\r\n", step_motor_pos);
+                break;
+            }
+        } else {
+            static_count = 0;
+            printf("⚠️ [危险] 丝杆仍在滑动 (前:%ld -> 现:%ld)，继续强制抱死！\r\n", last_pos, step_motor_pos);
+        }
+        
+        last_pos = step_motor_pos;
+    }
+    
+    // 停稳后再给整车 200ms 的应力释放缓冲时间
+    osDelay(200); 
+}
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -164,7 +216,6 @@ void StartChassisTask(void *argument);
 void StartStepperTask(void *argument);
 void StartAutoClimbTask(void *argument);
 void StartSensorTask(void *argument);
-
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /**
@@ -322,27 +373,43 @@ void StartCommTask(void *argument)
               }
           }
       }
-      else 
+			else 
       {
           // ==========================================
-          // 500ms 没收到数据，检查是否超时
+          // 500ms 没收到有效数据，开始检查是否超时断连
           // ==========================================
           if (is_bt_connected == true && (HAL_GetTick() - last_bt_heartbeat > 1000)) 
           {
-              // 🌟 核心修复：只有在【手动模式】下，才判定为掉线急刹车！
-              if (robot_mode == 0) 
-              {
-                  is_bt_connected = false;
-                  printf("❌ [蓝牙状态] 蓝牙已断开连接，启动紧急保护！\r\n");
-                  STOP_SWEEPER(); // 🌟 加在这里！断联安全关闭扫地机构！
-                  extern void Motor_Contro2(int,int,int,int);
-                  Motor_Contro2(0, 0, 0, 0); 
-								  Emm_V5_Stop_Now(1, false);
-                  int stop_z = 0;
-                  osMessageQueuePut(StepperQueueHandle, &stop_z, 0, 0); 
-                  
+              is_bt_connected = false;
+              printf("❌ [蓝牙卫士] 信号丢失超过 1 秒，判定为断连！执行全车紧急刹车！\r\n");
+              
+              // 1. 紧急切断外围机构
+              STOP_SWEEPER(); 
+              
+              // 2. 履带/麦轮底盘物理急刹
+              extern void Motor_Contro2(int,int,int,int);
+              Motor_Contro2(0, 0, 0, 0); 
+              
+              // 3. 步进电机锁轴抱死
+              Emm_V5_Stop_Now(1, false);
+              int stop_z = 0;
+              osMessageQueuePut(StepperQueueHandle, &stop_z, 0, 0); 
+              
+              // 4. 如果正在自动爬楼，立刻挂起任务并切回手动模式！
+              if (robot_mode == 1) {
                   osThreadSuspend(AutoClimbTaskHandle); 
+                  robot_mode = 0; 
+                  printf("⚠️ 已强制打断自动爬楼任务！\r\n");
               }
+
+              // 5. 🌟 终极防死锁：暴力重启蓝牙 UART4 接收链路
+              // 很多时候连不上是因为底层的 ORE (溢出错误) 把串口卡死了
+              extern UART_HandleTypeDef huart4;
+              HAL_UART_AbortReceive(&huart4);
+              __HAL_UART_CLEAR_OREFLAG(&huart4);
+              __HAL_UART_CLEAR_NEFLAG(&huart4);
+              __HAL_UART_CLEAR_FEFLAG(&huart4);
+              HAL_UARTEx_ReceiveToIdle_IT(&huart4, (uint8_t *)bt_rx_buf, 64);
           }
       }
   }
@@ -424,7 +491,7 @@ void StartStepperTask(void *argument)
 	
 	uint32_t last_poll_time = 0; // 🌟 1. 新增：轮询时间戳
   
-  #define MOTOR_MIN_LIMIT    -150000       
+  #define MOTOR_MIN_LIMIT    -100000       
   #define MOTOR_MAX_LIMIT    2098909 
 
   for(;;)
@@ -566,12 +633,12 @@ void StartAutoClimbTask(void *argument)
   
   // 🎯 基础动作阈值
   #define AUTO_TARGET_UP       2098909   // 步进电机目标升高位置 
-  #define AUTO_TARGET_DOWN     -15000    // 步进电机降落目标位置
+  #define AUTO_TARGET_DOWN     -10000    // 步进电机降落目标位置
   #define ULTRA_STOP_DIST      50        // 正常爬楼时的超声波停止距离
   #define ULTRA_STEP_FWD_DIST  125       // 单级台阶上，允许步进电机下降的安全超声波距离
   
   // 🌟 全新雷达闭环控制参数
-  #define LIDAR_LEFT_STOP_DIST       400   // 雷达左侧停止距离
+  #define LIDAR_LEFT_STOP_DIST       350   // 雷达左侧停止距离
   #define LIDAR_RIGHT_STOP_DIST      400   // 雷达右侧停止距离
   #define LIDAR_RIGHT_WALL_MIN_DIST  210   // 扫地时离右墙(原前墙)的最小距离
   #define LIDAR_RIGHT_PLATFORM_LIMIT 890   // 扫地时退回防跌落边缘的距离
@@ -581,10 +648,8 @@ void StartAutoClimbTask(void *argument)
   #define ULTRA_PLATFORM_DETECT  1700      // 判定登顶距离 (平台深度 + 台阶宽度，需实测)
   #define MAX_SHIFT_TIMES        8         // 最大S型扫地循环次数
 	
-	// 👇========== 新增：雷达替代超声波的阈值 ==========👇
-  #define LIDAR_LAST_STEP_DIST    1814  // 预设：爬上平台最后一步距离 (原 ULTRA_LAST_STEP_DIST)
-  #define LIDAR_PRE_TURN_TARGET   1440  // 预设：准备转向的目标距离 (原 pre_turn_target)
-  // 👆================================================👆
+  #define LIDAR_LAST_STEP_DIST    1814  	 // 爬上平台最后一步距离 (原 ULTRA_LAST_STEP_DIST)
+  #define LIDAR_PRE_TURN_TARGET   1440  	 // 准备转向的目标距离 (原 pre_turn_target)
   
   #define CRAWLER_FWD_SPEED      6000      // 履带平台前进速度 (爬最后台阶用)
   #define CRAWLER_REV_SPEED      -6000     // 履带平台后退速度
@@ -660,7 +725,7 @@ for(;;)
       // 动作 1：步进电机上升，【同时实时侦测超声波】
       // ==========================================================
       printf("➡️ 动作1: 步进上升并侦测地形...\r\n");
-      stepper_cmd = 100; 
+      stepper_cmd = 80; 
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
       
       extern UART_HandleTypeDef huart5;
@@ -689,12 +754,10 @@ for(;;)
           
           printf("\r\n[平台清扫] 阶段 1: 确保步进电机已升至设定最高处...\r\n");
           // 彻底删掉 +200000，直接使用设定的绝对最高点
-          stepper_cmd = 100;
+          stepper_cmd = 150;
           osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
           while (step_motor_pos < AUTO_TARGET_UP) { osDelay(100); } 
-          stepper_cmd = 0;
-          osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
-          osDelay(200);
+          Safe_Stepper_Stop();
 
 					printf("\r\n[平台清扫] 阶段 2: 履带持续前进，直到后轮登上最后一个台阶...\r\n");
           
@@ -734,8 +797,7 @@ for(;;)
           }
           
           // 触达目标，下发刹车指令
-          stepper_cmd = 0;
-          osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
+          Safe_Stepper_Stop();
           
           // 和动作 4 一样，停顿 300ms 让车身彻底稳住
           osDelay(300); 
@@ -770,52 +832,79 @@ for(;;)
           // 给足 800ms，让底盘麦轮彻底停稳，消除前进惯性，再进行阶段 4 的原地旋转
           osDelay(800);
           
-         // 🌟🌟🌟 全新改版的阶段 4：方向修正与多轴排查 🌟🌟🌟
-          printf("\r\n[平台清扫] 阶段 4: 开始旋转掉头与轴向排查！\r\n");
-          
-          float integrated_yaw = 0.0f;       
-          float target_yaw = 90.0f;  // 目标保持 90 度
-          extern void Tuoluo_Read(Tuoluo_Data_t *data); 
-          Tuoluo_Data_t imu_data = {0}; // 🌟 核心修复：赋初值，防止 I2C 失败时出现脏数据
-          int print_cnt = 0;
+        // 🌟🌟🌟 全新改版的阶段 4：引入精准时间积分与 PI 闭环控制 🌟🌟🌟
+					printf("\r\n[平台清扫] 阶段 4: 逆时针旋转 90 度，调整机头朝向！\r\n");
 
-          while (1) {
-              Tuoluo_Read(&imu_data);
-              
-              // 🌟 1. 暂时关掉死区过滤，看看最真实的传感器原始波动！
-              // if (abs((int)imu_data.Gyro_Z) < 2) { imu_data.Gyro_Z = 0; }
+					float integrated_yaw = 0.0f;
+					float target_yaw = 90.0f;  // 正数代表逆时针(左转) 90 度
+					float error_sum = 0.0f;    // 🌟 新增：积分累加器（用于 I 控制）
 
-              // 暂且先积分 Z 轴，一会看看打印出来的数据对不对
-              integrated_yaw += (imu_data.Gyro_Z * 0.03f);
-              float err = target_yaw - integrated_yaw;
+					// 🌟 PID 参数 (根据你的麦克纳姆轮底盘实际响应微调)
+					float Kp = 1.2f;   // 决定靠近时的减速平滑度
+					float Ki = 0.05f;  // 决定最后几度的“磨蹭”克服静摩擦的能力
 
-              // 🌟 2. 修正方向：既然正数是顺时针，这里加个负号让它输出负W，它就会逆时针转！
-              int w_speed = -(int)(err * 1.5f); 
-              
-              // 误差足够小，退出循环
-              if (abs((int)err) <= 2) { 
-                  printf("✅ 掉头完成！\r\n");
-                  break;
-              }
+					extern void Tuoluo_Read(Tuoluo_Data_t *data); 
+					Tuoluo_Data_t imu_data;
 
-              // 限速与死区补偿 (确保负数 W 时也有最低起步动力)
-              if (w_speed > 60) w_speed = 60;
-              if (w_speed < -60) w_speed = -60;
-              if (w_speed > 0 && w_speed < 20) w_speed = 20;
-              if (w_speed < 0 && w_speed > -20) w_speed = -20;
+					uint32_t last_time = HAL_GetTick(); // 🌟 记录上一次读取的系统时间
+					int print_cnt = 0;
 
-              // 🌟 3. 抓鬼大招：把 X、Y、Z 三个轴全打出来！看看到底哪个轴在动！
-              if (++print_cnt >= 5) {
-                  printf("🔄 [排查] X:%.2f | Y:%.2f | Z:%.2f | 累计:%.2f | 真实W指令:%d\r\n", 
-                         imu_data.Gyro_X, imu_data.Gyro_Y, imu_data.Gyro_Z, integrated_yaw, w_speed);
-                  print_cnt = 0;
-              }
+					while (1) {
+							Tuoluo_Read(&imu_data);
+							
+							// 1. 精准时间计算 (真实 dt)
+							uint32_t current_time = HAL_GetTick();
+							float dt = (current_time - last_time) / 1000.0f; // 转换为秒
+							last_time = current_time;
 
-              ChassisMsg_t msg_turn = {0, 0, w_speed};
-              osMessageQueuePut(ChassisQueueHandle, &msg_turn, 0, 0);
-              osDelay(30); 
-          }
-					
+							// 防止首次循环或系统因中断卡顿时，dt 过大导致积分爆炸
+							if (dt > 0.1f) dt = 0.03f; 
+
+							// 2. 滤除静止时的零漂：放宽一点死区，BMI270 偶有微小底噪
+							if (imu_data.Gyro_Z > -1.5f && imu_data.Gyro_Z < 1.5f) {
+									imu_data.Gyro_Z = 0.0f; 
+							}
+
+							// 3. 真实的偏航角积分：真实速度 × 真实时间差
+							integrated_yaw += (imu_data.Gyro_Z * dt);
+							float err = target_yaw - integrated_yaw;
+
+							// 4. PI 控制器计算输出速度
+							error_sum += (err * dt); 
+							
+							// 积分限幅 (Anti-windup)，防止长时间卡住导致积分过大，放开后猛冲
+							if (error_sum > 500.0f) error_sum = 500.0f;
+							if (error_sum < -500.0f) error_sum = -500.0f;
+
+							int w_speed = (int)((Kp * err) + (Ki * error_sum)); 
+
+							// 调试打印 (降频)
+							if (++print_cnt >= 5) {
+									printf("🔄 dt:%.3fs | Z角速度:%.1f | 角度:%.1f | 误差:%.1f | W指令:%d\r\n", 
+												 dt, imu_data.Gyro_Z, integrated_yaw, err, w_speed);
+									print_cnt = 0;
+							}
+
+							// 5. 🌟 严苛的退出条件：角度误差小于 1.5°，且底盘必须已经基本停转 (< 2°/s)
+							if (abs((int)err) <= 1 && abs((int)imu_data.Gyro_Z) <= 2) { 
+									printf("✅ 逆时针 90 度掉头精准完成！最终累计角度: %.2f\r\n", integrated_yaw);
+									break;
+							}
+
+							// 6. 限速与静摩擦力补偿
+							if (w_speed > 60) w_speed = 60;   // 整体最高速度限制
+							if (w_speed < -60) w_speed = -60;
+							// 有了 I 积分后，最低启动速度可以稍微降低，让它停得更柔和
+							if (w_speed > 0 && w_speed < 12) w_speed = 12; 
+							if (w_speed < 0 && w_speed > -12) w_speed = -12;
+
+							ChassisMsg_t msg_turn = {0, 0, w_speed};
+							osMessageQueuePut(ChassisQueueHandle, &msg_turn, 0, 0);
+							
+							osDelay(30); 
+					}
+					osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+					osDelay(800); // 停稳后再进行下一步
 					
           printf("\r\n[平台清扫] 阶段 5: 开始雷达侧向闭环 S 型清扫！\r\n");
           int shift_count = 0; 
@@ -893,32 +982,57 @@ for(;;)
               shift_count++;
           }
 
-          printf("\r\n[平台清扫结束] 阶段 6: 再次旋转，准备进入常规台阶对齐逻辑...\r\n");
-          integrated_yaw = 0.0f;
-          // -90.0f 是顺时针(右转)转回去，与前面的逆时针抵消，使机头重新朝向正前方
-          target_yaw = -90.0f; 
+					printf("\r\n[平台清扫结束] 阶段 6: 再次旋转，准备进入常规台阶对齐逻辑...\r\n");
+					integrated_yaw = 0.0f;
+					target_yaw = 90.0f; // 🌟 顺时针(右转)转回去
+					error_sum = 0.0f;    // 积分器清零
 
-          while (1) {
-              Tuoluo_Read(&imu_data);
-              integrated_yaw += (imu_data.Gyro_Z * 0.03f);
-              float err = target_yaw - integrated_yaw;
+					last_time = HAL_GetTick(); // 更新时间戳
 
-              if (abs((int)err) <= 2) { 
-                  printf("✅ 再次旋转完成！\r\n");
-                  break;
-              }
-              int w_speed = (int)(err * 1.5f); 
-              if (w_speed > 60) w_speed = 60;
-              if (w_speed < -60) w_speed = -60;
-              if (w_speed > 0 && w_speed < 20) w_speed = 20;
-              if (w_speed < 0 && w_speed > -20) w_speed = -20;
+					while (1) {
+							Tuoluo_Read(&imu_data);
+							
+							// 1. 精准时间计算
+							uint32_t current_time = HAL_GetTick();
+							float dt = (current_time - last_time) / 1000.0f; 
+							last_time = current_time;
+							if (dt > 0.1f) dt = 0.03f; 
 
-              ChassisMsg_t msg_turn = {0, 0, w_speed};
-              osMessageQueuePut(ChassisQueueHandle, &msg_turn, 0, 0);
-              osDelay(30); 
-          }
-          osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
-          osDelay(800);
+							// 2. 滤除静止时的零漂
+							if (imu_data.Gyro_Z > -1.5f && imu_data.Gyro_Z < 1.5f) {
+									imu_data.Gyro_Z = 0.0f; 
+							}
+
+							// 3. 积分与误差
+							integrated_yaw += (imu_data.Gyro_Z * dt);
+							float err = target_yaw - integrated_yaw;
+
+							// 4. PI 控制
+							error_sum += (err * dt); 
+							if (error_sum > 500.0f) error_sum = 500.0f;
+							if (error_sum < -500.0f) error_sum = -500.0f;
+
+							int w_speed = (int)((Kp * err) + (Ki * error_sum)); 
+
+							// 5. 退出条件：误差极小且基本停转
+							if (abs((int)err) <= 1 && abs((int)imu_data.Gyro_Z) <= 2) { 
+									printf("✅ 顺时针 90 度回转精准完成！\r\n");
+									break;
+							}
+
+							// 6. 限速与静摩擦力补偿
+							if (w_speed > 60) w_speed = 60;
+							if (w_speed < -60) w_speed = -60;
+							if (w_speed > 0 && w_speed < 12) w_speed = 12; 
+							if (w_speed < 0 && w_speed > -12) w_speed = -12;
+
+							ChassisMsg_t msg_turn = {0, 0, w_speed};
+							osMessageQueuePut(ChassisQueueHandle, &msg_turn, 0, 0);
+							
+							osDelay(30); 
+					}
+					osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+					osDelay(800);
           
           // ⚠️ 平台结束后不再使用 continue 跳出循环，而是让代码继续往下流，
           // 自然地进入后续的动作 5/6 (左移对齐) 和 7/8 (右移对齐) 以及后续的攀爬逻辑。
@@ -930,9 +1044,7 @@ for(;;)
       // ==========================================================
       printf("\r\n[普通台阶] 开始执行常规台阶攀爬及对齐逻辑...\r\n");
       
-      stepper_cmd = 0;
-      osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
-      osDelay(200);
+      Safe_Stepper_Stop();
       
       // 👇------------------------------------------------------👇
       // 动作 2 & 3：Motor_Contro2 控制前进，直到超声波达到阈值
@@ -948,7 +1060,7 @@ for(;;)
       HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16);
 
       // 软启动加速的同时，同步让超声波开眼！
-      for(int speed = 3000; speed <= 12000; speed += 3000) {
+      for(int speed = 4000; speed <= 16000; speed += 4000) {
           Motor_Contro2(speed, speed, speed, speed);
           uint8_t trig_cmd[1] = {0xA0}; 
           HAL_UART_Transmit(&huart5, trig_cmd, 1, 50);
@@ -1015,7 +1127,7 @@ for(;;)
       // 动作 4：步进电机顺时针旋转，回到原位置 (下降)
       // ==========================================================
       printf("➡️ 动作4: 步进电机下降中...\r\n");
-      stepper_cmd = -40; 
+      stepper_cmd = -80; 
       osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
       
       // 🌟 监控升级：每 100ms 打印一次实时位置！
@@ -1024,9 +1136,7 @@ for(;;)
           osDelay(100); 
       }
       
-      stepper_cmd = 0;
-      osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
-      osDelay(300); // 停顿一下让车身稳住
+      Safe_Stepper_Stop();
 
       // 👇👇👇 🌟 核心新增：动作 4.5 步进收腿后，先直行贴近下一层台阶 👇👇👇
       // ==========================================================
