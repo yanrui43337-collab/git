@@ -139,7 +139,9 @@ void Emm_V5_Vel_Control(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bo
   cmd[7] =  0x6B;                       // 校验字节
   
   // 发送命令
-  HAL_UART_Transmit_DMA(&huart3, (uint8_t *)cmd, 8);
+  extern UART_HandleTypeDef huart3;
+  HAL_UART_AbortTransmit(&huart3); // 🌟 发送前强行打断死锁状态
+  HAL_UART_Transmit(&huart3, (uint8_t *)cmd, 8, 50); // 🌟 阻塞式强制发送，使命必达！
 }
 
 /**

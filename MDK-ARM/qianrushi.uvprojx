@@ -337,7 +337,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls></MiscControls>
+              <MiscControls>--no_multibyte_chars</MiscControls>
               <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H750xx</Define>
               <Undefine></Undefine>
               <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include</IncludePath>
@@ -405,11 +405,6 @@
               <FilePath>..\Core\Src\bmi270.c</FilePath>
             </File>
             <File>
-              <FileName>tuoluo.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\Src\tuoluo.c</FilePath>
-            </File>
-            <File>
               <FileName>bmi270_port.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\Src\bmi270_port.c</FilePath>
@@ -440,9 +435,14 @@
               <FilePath>..\Core\Src\ultrasonic_uart.c</FilePath>
             </File>
             <File>
-              <FileName>ultrasonic_uart.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\Inc\ultrasonic_uart.h</FilePath>
+              <FileName>auto_climb.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\auto_climb.c</FilePath>
+            </File>
+            <File>
+              <FileName>my_imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\对方看啥\原使用代码\qianrushi\Core\Src\my_imu.c</FilePath>
             </File>
             <File>
               <FileName>main.c</FileName>

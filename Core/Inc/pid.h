@@ -3,7 +3,7 @@
 
 #include <math.h>
 
-// 1. ÖÆÔì PID µÄ¡°Ä£¾ß£¨Í¼Ö½£©¡±
+// 1. ï¿½ï¿½ï¿½ï¿½ PID ï¿½Ä¡ï¿½Ä£ï¿½ß£ï¿½Í¼Ö½ï¿½ï¿½ï¿½ï¿½
 typedef struct 
 {
   float kp;                       
@@ -14,16 +14,16 @@ typedef struct
   float ek2;                      
   float location_sum;             
   float out;   
-  // ×¢Òâ£ºÕâÀïÖ»ÉùÃ÷£¬¾ø¶Ô²»ÄÜÐ´ = 700 !
+  // ×¢ï¿½â£ºï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô²ï¿½ï¿½ï¿½Ð´ = 700 !
   float limit_max;                
   float limit_min; 
 } PID_LocTypeDef;
 
-// 2. º¯ÊýÉùÃ÷ (°ÑÄãÔ­À´ÄÇ¸öÞÖ¿ÚµÄ PSpeedPIDControl_Struct »»³ÉÁË¸üÇåÎúµÄÖ¸Õë)
+// 2. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½Ô­ï¿½ï¿½ï¿½Ç¸ï¿½ï¿½Ö¿Úµï¿½ PSpeedPIDControl_Struct ï¿½ï¿½ï¿½ï¿½ï¿½Ë¸ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¸ï¿½ï¿½)
 float PID_location(float setvalue, float actualvalue, PID_LocTypeDef *PID);
 float PID_increment(float setvalue, float actualvalue, PID_LocTypeDef *PID);
 
-// 3. ¶ÔÍâÐû¸æ£ºÎÒÃÇÓÐ 5 ¸ö PID ÊµÌå±øÍÅ£¡ÈÃ main.c Ò²ÄÜÈÏÊ¶ËüÃÇ
+// 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½æ£ºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 5 ï¿½ï¿½ PID Êµï¿½ï¿½ï¿½ï¿½Å£ï¿½ï¿½ï¿½ main.c Ò²ï¿½ï¿½ï¿½ï¿½Ê¶ï¿½ï¿½ï¿½ï¿½
 extern PID_LocTypeDef Motor1_Speed_PID;
 extern PID_LocTypeDef Motor2_Speed_PID;
 extern PID_LocTypeDef Motor3_Speed_PID;

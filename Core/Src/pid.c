@@ -1,5 +1,16 @@
+#include "auto_climb.h"
+#include "FreeRTOS.h"
+#include "cmsis_os2.h"
+#include <string.h>
+#include "stdio.h"
 #include "pid.h"
-
+#include "Emm_V5.h"
+#include <stdbool.h>
+#include <lidar.h>
+#include <Robot_control.h>
+#include <ultrasonic_uart.h>
+#include <stdlib.h>
+#include "main.h" 
 // ==========================================
 // 1. 实体化：造出 4 个控制电机转速的 PID (输出范围 ±1000，用来给 PWM)
 // ==========================================
@@ -56,3 +67,7 @@ float PID_increment(float setvalue, float actualvalue, PID_LocTypeDef *PID)
 
     return PID->out;
 }
+
+// 引入必要的外部变量
+extern PID_LocTypeDef Yaw_Angle_PID;
+extern osMessageQueueId_t ChassisQueueHandle;

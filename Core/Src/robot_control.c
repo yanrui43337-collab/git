@@ -3,8 +3,6 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-
-#include "tuoluo.h"
 #include "stdio.h"
 #include "pid.h"
 #include "Emm_V5.h"
@@ -12,9 +10,6 @@
 #include <lidar.h>
 
 //#include "ultrasonic_uart.h"
-
-// ... 状态机代码 ...
-
 
 // 声明外部的定时器和PID结构体
 extern TIM_HandleTypeDef htim3;

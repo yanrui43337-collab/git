@@ -30,7 +30,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
-#include "tuoluo.h"
 #include "stdio.h"
 #include "pid.h"
 #include "Emm_V5.h"
@@ -73,6 +72,7 @@ static void MPU_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 // 定义接收缓冲区和标志
+uint8_t imu_rx_byte; // 专门用来接收 IMU 数据的单字节变量
 uint8_t rx_buffer[11]; // 接收11字节的一帧数据
 uint8_t rx_index = 0;
 uint8_t data_ready = 0; // 一帧数据接收完成标志
@@ -106,7 +106,6 @@ uint16_t obj_x, obj_y, obj_w, obj_h;
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-Tuoluo_Data_t my_robot_imu; // 声明一个结构体变量，用来接数据
 
 /* USER CODE END 0 */
 
@@ -157,6 +156,10 @@ int main(void)
   MX_UART4_Init();
   MX_TIM6_Init();
   MX_UART5_Init();
+  MX_UART8_Init();
+  MX_TIM15_Init();
+  MX_TIM16_Init();
+  MX_TIM17_Init();
   /* USER CODE BEGIN 2 */
 	
 				printf("\r\n\r\n⏳ 系统上电，等待外设模块开机初始化...\r\n");
@@ -182,7 +185,13 @@ int main(void)
 	
 		HAL_TIM_PWM_Init(&htim1);
 		HAL_TIM_PWM_Init(&htim2);
-
+    // 开启 UART8 的中断接收（每收到 1 个字节进一次中断）
+   // 开启 UART8 的中断接收前，先清空可能因为延时产生的 ORE 垃圾标志！
+    HAL_UART_AbortReceive(&huart8);    
+    __HAL_UART_CLEAR_OREFLAG(&huart8); 
+    __HAL_UART_CLEAR_NEFLAG(&huart8);  
+    __HAL_UART_CLEAR_FEFLAG(&huart8);  
+    HAL_UART_Receive_IT(&huart8, &imu_rx_byte, 1);
 		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // M1: PE9
 		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); // M1: PE11
 		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3); // M1: PE13
@@ -191,6 +200,9 @@ int main(void)
 		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2); // M2: PB3
 		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // M2: PA2
 		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4); // M2: PA3
+		HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);    //PE6
+		HAL_TIMEx_PWMN_Start(&htim16, TIM_CHANNEL_1);    // 启动 TIM16 互补通道 1N (注意有 Ex 和 N)
+    HAL_TIMEx_PWMN_Start(&htim17, TIM_CHANNEL_1);    // 启动 TIM17 互补通道 1N (注意有 Ex 和 N)
 		HAL_UART_Receive_IT(&huart2, &aRxBuffer, 1);
 		HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
     HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
@@ -348,13 +360,27 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
 int fputc(int ch, FILE *f)
 {
     uint8_t c = (uint8_t)ch;
     HAL_UART_Transmit(&huart1, &c, 1, 1000);
     return ch;
 }
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if(huart->Instance == UART8)
+    {
+			
+			
+        // 1. 调用驱动函数，把收到的这个字节存进环形缓冲区
+        extern void IMU_UART_RxByte_Callback(uint8_t data);
+        IMU_UART_RxByte_Callback(imu_rx_byte);
 
+        // 2. 重新开启中断，等待下一个字节
+        HAL_UART_Receive_IT(&huart8, &imu_rx_byte, 1);
+    }
+}
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
     if(huart->Instance == USART3) 
