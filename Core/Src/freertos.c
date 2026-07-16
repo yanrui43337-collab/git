@@ -186,6 +186,11 @@ const osSemaphoreAttr_t Sem_SensorRx_attributes = {
   .name = "Sem_SensorRx"
 };
 
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN FunctionPrototypes */
+
+/* USER CODE END FunctionPrototypes */
+
 void StartCommTask(void *argument);
 void StartChassisTask(void *argument);
 void StartStepperTask(void *argument);
@@ -356,7 +361,7 @@ void StartCommTask(void *argument)
                   } 
                   else if (abs(cmd_x) > 10 || abs(cmd_y) > 10 || abs(cmd_w) > 10) {
                       // 2. 如果步进没动，且底盘摇杆有动作（无论是左右Y、前后X还是旋转W），开启扫地机构
-                      START_SWEEPER();
+                    
                   } 
                   else {
                       // 3. 如果摇杆全部居中（全车静止），关闭扫地机构
@@ -436,8 +441,8 @@ void StartChassisTask(void *argument)
   // 🌟 纠偏专用的魔法变量
   float target_yaw = 0.0f;       
   bool is_yaw_locked = false;    
-  float Kp_yaw = 0.0f;           // 如果车子左右摆动太厉害，改小至 1.0f
-
+  //float Kp_yaw = -1.0f;           // 如果车子左右摆动太厉害，改小至 1.0f
+	float Kp_yaw = 0.0f;
   for(;;)
   {        
       // 1. 疯狂处理环形缓冲区里的数据包
@@ -733,6 +738,7 @@ void StartSensorTask(void *argument)
   }
   /* USER CODE END StartSensorTask */
 }
+
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
