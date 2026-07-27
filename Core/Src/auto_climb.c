@@ -15,25 +15,226 @@
 /* ========================================================== */
 /* ==================== 1. 宏定义区域 ======================= */
 /* ========================================================== */
-#define AUTO_TARGET_UP       2098909   // 步进电机上升目标脉冲数（台阶高度）
-#define AUTO_TARGET_DOWN     -10000    // 步进电机下降目标脉冲数（底盘着地）
+#define AUTO_TARGET_UP       2000000   // 步进电机上升目标脉冲数（台阶高度）
+#define AUTO_TARGET_DOWN     -80000    // 步进电机下降目标脉冲数（底盘着地）
 #define ULTRA_STOP_DIST      50        // 超声波停止直行距离（贴紧台阶）
 #define ULTRA_STEP_FWD_DIST  125       // 超声波安全爬坡前进距离 
 
-#define LIDAR_LEFT_STOP_DIST       450   // 避障/对齐：雷达左侧安全停止距离
-#define LIDAR_RIGHT_STOP_DIST      500   // 避障/对齐：雷达右侧安全停止距离
-#define LIDAR_RIGHT_WALL_MIN_DIST  450   // S型扫平：右侧贴墙最小距离（换轨标志）
-#define LIDAR_RIGHT_PLATFORM_LIMIT 1000   // S型扫平：右侧平台边缘极限距离（防跌落）
+#define LIDAR_LEFT_STOP_DIST       440   // 避障/对齐：雷达左侧安全停止距离
+#define LIDAR_RIGHT_STOP_DIST      480   // 避障/对齐：雷达右侧安全停止距离
+#define LIDAR_RIGHT_WALL_MIN_DIST  440   // S型扫平：右侧贴墙最小距离（换轨标志）
+#define LIDAR_RIGHT_PLATFORM_LIMIT 1150   // S型扫平：右侧平台边缘极限距离（防跌落）
 #define ROBOT_FWD_STEP_DIST        190   // S型扫平：每次换轨前行的精准物理距离 (已按你要求改大至 200)
-#define PLATFORM_FRONT_END_DIST    380    // S型扫平终极目标，离前方墙壁 40mm 结束清扫
+#define PLATFORM_FRONT_END_DIST    580    // S型扫平终极目标，离前方墙壁 40mm 结束清扫
 
-#define ULTRA_PLATFORM_DETECT  1700      // 核心标志：超声波突变阈值（大于此值判定前方是空旷平台）
+#define ULTRA_PLATFORM_DETECT  1600      // 核心标志：超声波突变阈值（大于此值判定前方是空旷平台）
 
-#define LIDAR_LAST_STEP_DIST    1834  	 // 核心判定：后轮登顶台阶时，车头雷达距离前方墙壁的距离
-#define LIDAR_PRE_TURN_TARGET   1440  	 // 核心安全：旋转前直行，驶离台阶边缘的安全避开距离
+#define LIDAR_LAST_STEP_DIST    1770  	 // 核心判定：后轮登顶台阶时，车头雷达距离前方墙壁的距离
+#define LIDAR_PRE_TURN_TARGET   1240  	 // 核心安全：旋转前直行，驶离台阶边缘的安全避开距离
 
 #define CRAWLER_FWD_SPEED      6000      // 爬坡履带前进基准速度
 #define CRAWLER_REV_SPEED      -6000     // 爬坡履带后退基准速度
+
+
+// ==========================================================
+// 🌟 平台清扫防撞：人腿/墙壁几何特征提取算法
+// ==========================================================
+#include "arm_math.h"
+
+#define OBSTACLE_NONE 0
+#define OBSTACLE_LEG  1
+#define OBSTACLE_WALL 2
+
+// 演示安全区：车头前方 75cm，车尾后方 15cm (保护斜后方的讲解人)
+#define DEMO_SAFE_X_MIN   -150.0f
+#define DEMO_SAFE_X_MAX    750.0f
+
+#define LEG_WIDTH_MIN_SQ 6400.0f    
+#define LEG_WIDTH_MAX_SQ 62500.0f   
+#define EPSILON_SQ       10000.0f   
+#define MAX_LEG_SPAN_SQ  160000.0f  
+#define COLLINEAR_ERR_SQ 2500.0f    
+
+#define MAX_POINTS 360 
+
+typedef struct {
+    float x;
+    float y;
+    int cluster_id;
+} Point2D;
+
+typedef struct {
+    float cx;
+    float cy;
+} ClusterCenter_t;
+
+// 引入我们在 lidar.c 中算好的直角坐标点云
+extern Point2D scan_points[MAX_POINTS]; 
+
+static inline float get_dist_sq(Point2D* p1, Point2D* p2) {
+    float dx = p1->x - p2->x;
+    float dy = p1->y - p2->y;
+    return (dx * dx + dy * dy);
+}
+
+// ---------------- 1. 右侧识别算法 ----------------
+uint8_t Analyze_Right_Obstacle(float danger_y_threshold) 
+{
+    int leg_cluster_count = 0;
+    ClusterCenter_t centers[5]; 
+    int current_cluster = 1;
+
+    for (int i = 0; i < MAX_POINTS; i++) scan_points[i].cluster_id = 0;
+
+    for (int i = 0; i < MAX_POINTS; i++) {
+        if (scan_points[i].cluster_id != 0 || scan_points[i].cluster_id == -1) continue;
+
+        // ROI 过滤：保留前 75cm 后 15cm，只看右侧 (Y为负数)
+        if (scan_points[i].x < DEMO_SAFE_X_MIN || scan_points[i].x > DEMO_SAFE_X_MAX || 
+            scan_points[i].y > 0.0f || scan_points[i].y < danger_y_threshold) {
+            scan_points[i].cluster_id = -1; 
+            continue;
+        }
+
+        int points_in_cluster = 1;
+        scan_points[i].cluster_id = current_cluster;
+        
+        float min_x = scan_points[i].x, max_x = scan_points[i].x;
+        float min_y = scan_points[i].y, max_y = scan_points[i].y;
+
+        for (int j = i + 1; j < MAX_POINTS; j++) {
+            if (scan_points[j].cluster_id != 0) continue;
+            if (get_dist_sq(&scan_points[i], &scan_points[j]) < EPSILON_SQ) {
+                scan_points[j].cluster_id = current_cluster;
+                points_in_cluster++;
+                
+                if (scan_points[j].x < min_x) min_x = scan_points[j].x;
+                if (scan_points[j].x > max_x) max_x = scan_points[j].x;
+                if (scan_points[j].y < min_y) min_y = scan_points[j].y;
+                if (scan_points[j].y > max_y) max_y = scan_points[j].y;
+            }
+        }
+
+        if (points_in_cluster >= 4) { 
+            float dx = max_x - min_x;
+            float dy = max_y - min_y;
+            float width_sq = dx * dx + dy * dy;
+
+            if (width_sq > LEG_WIDTH_MAX_SQ) return OBSTACLE_WALL; 
+            else if (width_sq >= LEG_WIDTH_MIN_SQ && width_sq <= LEG_WIDTH_MAX_SQ) {
+                if (leg_cluster_count < 5) {
+                    centers[leg_cluster_count].cx = (min_x + max_x) / 2.0f;
+                    centers[leg_cluster_count].cy = (min_y + max_y) / 2.0f;
+                }
+                leg_cluster_count++;
+            }
+        }
+        current_cluster++;
+    }
+
+    if (leg_cluster_count == 0) return OBSTACLE_NONE;
+    if (leg_cluster_count == 1) return OBSTACLE_LEG;
+    if (leg_cluster_count == 2) {
+        float span_x = centers[0].cx - centers[1].cx;
+        float span_y = centers[0].cy - centers[1].cy;
+        if ((span_x*span_x + span_y*span_y) > MAX_LEG_SPAN_SQ) return OBSTACLE_WALL;
+        return OBSTACLE_LEG; 
+    }
+    if (leg_cluster_count >= 3) {
+        float v1_x = centers[1].cx - centers[0].cx;
+        float v1_y = centers[1].cy - centers[0].cy;
+        float v2_x = centers[2].cx - centers[0].cx;
+        float v2_y = centers[2].cy - centers[0].cy;
+        float cross = v1_x * v2_y - v1_y * v2_x;
+        float length_v1_sq = v1_x * v1_x + v1_y * v1_y;
+        
+        if (length_v1_sq > 0.1f && ((cross * cross) / length_v1_sq) < COLLINEAR_ERR_SQ) {
+            return OBSTACLE_WALL;
+        }
+        return OBSTACLE_LEG; 
+    }
+    return OBSTACLE_NONE;
+}
+
+// ---------------- 2. 左侧识别算法 (镜像处理) ----------------
+uint8_t Analyze_Left_Obstacle(float danger_y_threshold) 
+{
+    int leg_cluster_count = 0;
+    ClusterCenter_t centers[5]; 
+    int current_cluster = 1;
+
+    for (int i = 0; i < MAX_POINTS; i++) scan_points[i].cluster_id = 0;
+
+    for (int i = 0; i < MAX_POINTS; i++) {
+        if (scan_points[i].cluster_id != 0 || scan_points[i].cluster_id == -1) continue;
+
+        // ROI 过滤：只看左侧 (Y为正数)
+        if (scan_points[i].x < DEMO_SAFE_X_MIN || scan_points[i].x > DEMO_SAFE_X_MAX || 
+            scan_points[i].y < 0.0f || scan_points[i].y > danger_y_threshold) {
+            scan_points[i].cluster_id = -1; 
+            continue;
+        }
+
+        int points_in_cluster = 1;
+        scan_points[i].cluster_id = current_cluster;
+        
+        float min_x = scan_points[i].x, max_x = scan_points[i].x;
+        float min_y = scan_points[i].y, max_y = scan_points[i].y;
+
+        for (int j = i + 1; j < MAX_POINTS; j++) {
+            if (scan_points[j].cluster_id != 0) continue;
+            if (get_dist_sq(&scan_points[i], &scan_points[j]) < EPSILON_SQ) {
+                scan_points[j].cluster_id = current_cluster;
+                points_in_cluster++;
+                
+                if (scan_points[j].x < min_x) min_x = scan_points[j].x;
+                if (scan_points[j].x > max_x) max_x = scan_points[j].x;
+                if (scan_points[j].y < min_y) min_y = scan_points[j].y;
+                if (scan_points[j].y > max_y) max_y = scan_points[j].y;
+            }
+        }
+
+        if (points_in_cluster >= 4) { 
+            float dx = max_x - min_x;
+            float dy = max_y - min_y;
+            float width_sq = dx * dx + dy * dy;
+
+            if (width_sq > LEG_WIDTH_MAX_SQ) return OBSTACLE_WALL; 
+            else if (width_sq >= LEG_WIDTH_MIN_SQ && width_sq <= LEG_WIDTH_MAX_SQ) {
+                if (leg_cluster_count < 5) {
+                    centers[leg_cluster_count].cx = (min_x + max_x) / 2.0f;
+                    centers[leg_cluster_count].cy = (min_y + max_y) / 2.0f;
+                }
+                leg_cluster_count++;
+            }
+        }
+        current_cluster++;
+    }
+
+    if (leg_cluster_count == 0) return OBSTACLE_NONE;
+    if (leg_cluster_count == 1) return OBSTACLE_LEG;
+    if (leg_cluster_count == 2) {
+        float span_x = centers[0].cx - centers[1].cx;
+        float span_y = centers[0].cy - centers[1].cy;
+        if ((span_x*span_x + span_y*span_y) > MAX_LEG_SPAN_SQ) return OBSTACLE_WALL;
+        return OBSTACLE_LEG; 
+    }
+    if (leg_cluster_count >= 3) {
+        float v1_x = centers[1].cx - centers[0].cx;
+        float v1_y = centers[1].cy - centers[0].cy;
+        float v2_x = centers[2].cx - centers[0].cx;
+        float v2_y = centers[2].cy - centers[0].cy;
+        float cross = v1_x * v2_y - v1_y * v2_x;
+        float length_v1_sq = v1_x * v1_x + v1_y * v1_y;
+        
+        if (length_v1_sq > 0.1f && ((cross * cross) / length_v1_sq) < COLLINEAR_ERR_SQ) {
+            return OBSTACLE_WALL;
+        }
+        return OBSTACLE_LEG; 
+    }
+    return OBSTACLE_NONE;
+}
+// ==========================================================
 
 
 extern osMessageQueueId_t ChassisQueueHandle;
@@ -558,7 +759,7 @@ void AutoClimb_Process(void)
           start_yaw = IMU_Get_Yaw() * 57.29578f;   
           
           // 🌟 重新改回与阶段 4 一致的 +90.0f！实现累计 180 度掉头
-          target_yaw = start_yaw + 90.0f;     
+          target_yaw = start_yaw + 75.0f;     
 
           if (target_yaw > 180.0f) target_yaw -= 360.0f;
 

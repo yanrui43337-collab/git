@@ -526,8 +526,8 @@ void StartStepperTask(void *argument)
 	
 	uint32_t last_poll_time = 0; // 🌟 1. 轮询时间戳
   
-  #define MOTOR_MIN_LIMIT    -100000       
-  #define MOTOR_MAX_LIMIT    2098909 
+  #define MOTOR_MIN_LIMIT    -80000       
+  #define MOTOR_MAX_LIMIT    2000000 
 
   for(;;)
   {
@@ -716,7 +716,7 @@ void StartSensorTask(void *argument)
 
           // === 计算距离 ===
           front_min = Lidar_Get_Min_Distance_In_Range(350, 10);  
-          left_min  = Lidar_Get_Min_Distance_In_Range(260, 280); 
+          left_min  = Lidar_Get_Min_Distance_In_Range(250, 290); 
           right_min = Lidar_Get_Min_Distance_In_Range(80, 100);  
 
           extern int robot_mode; 

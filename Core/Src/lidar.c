@@ -24,10 +24,24 @@
 #include "math.h"
 #include <stdint.h>
 #include <stdio.h>
+#include "arm_math.h"  // 🌟 新增：必须引入 ARM DSP 库来加速三角函数！
 
 // --- 宏定义区 ---
 #define LIDAR_FRAME_LEN     58          // 协议中一帧数据的固定长度
 #define RX_BUF_SIZE         (64 * 10)   // 接收缓冲区大小，设为帧长的整数倍，防止数据溢出
+// ==========================================================
+// 🌟 新增：为聚类算法准备的全局直角坐标点云数组
+// ==========================================================
+#define MAX_POINTS 360 // 我们的雷达正好是 360 个度数的解析数组
+
+typedef struct {
+    float x;
+    float y;
+    int cluster_id;
+} Point2D;
+
+// 定义在 RAM 中，供外部的 auto_climb.c 调用
+Point2D scan_points[MAX_POINTS];
 
 // --- 全局变量区 ---
 /* * ?? H7 避坑指南：必须保证 DMA 使用的内存在 32 字节对齐，
@@ -118,9 +132,28 @@ void Lidar_Init(void)
         uint8_t dist_L = frame[8 + i * 3];
         uint16_t distance = (dist_H << 8) | dist_L;
         
-        // 7. 更新数组 (过滤掉距离为 0 的无效噪点)
+        // 7. 更新极坐标数组 (过滤掉距离为 0 的无效噪点)
         if (distance > 0) {
             Lidar_Distance_Array[index] = distance;
+            
+            // ==========================================================
+            // 🌟 核心新增：顺手将该点转换为 (X, Y) 坐标供避障算法使用
+            // ==========================================================
+            // 查表求弧度 (这里也可以预先建个 360 度的浮点查表来提速，不过 H7 跑算式也够快了)
+            float radian = index * 3.14159265f / 180.0f; 
+            
+            // 🌟 使用 DSP 硬件加速三角函数
+            scan_points[index].x = distance * arm_cos_f32(radian);
+            scan_points[index].y = distance * arm_sin_f32(radian);
+            // 标记为“新鲜”数据，尚未被聚类算法处理
+            scan_points[index].cluster_id = 0; 
+        } 
+        else {
+            // 如果雷达读数是 0 (无效点)，则在直角坐标系里将它扔到 10 米开外的“垃圾桶”
+            Lidar_Distance_Array[index] = 0;
+            scan_points[index].x = 10000.0f; 
+            scan_points[index].y = 10000.0f;
+            scan_points[index].cluster_id = -1; // 标记为无效点
         }
     }
 }
