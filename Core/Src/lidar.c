@@ -54,6 +54,8 @@ uint16_t Lidar_WriteIndex = 0; // DMA 写入位置
 uint16_t Lidar_ReadIndex = 0;  // 我们解析的读取位置
 
 uint16_t Lidar_Distance_Array[360] = {0};
+volatile uint32_t Lidar_ScanSequence = 0;
+volatile uint32_t Lidar_LastUpdateTick = 0;
 
 int left_min =0;   //左侧最小距离
 int right_min = 0; //右侧最小距离
@@ -84,6 +86,7 @@ void Lidar_Init(void)
 // --- 2. 核心解析函数：提取 360 度距离数据 ---
  void Lidar_ParseSingleFrame(uint8_t *frame)
 {
+    static float previous_start_angle = -1.0f;
     // 1. 校验 CRC (Byte_0 到 Byte_56 的累加和)
     uint8_t sum = 0;
     for(int i = 0; i < 57; i++) 
@@ -100,6 +103,12 @@ void Lidar_Init(void)
     // 除以 100.0f 是因为协议规定数值是实际角度的 100 倍
     float start_angle = ((frame[5] << 8) | frame[6]) / 100.0f;
     float stop_angle = ((frame[55] << 8) | frame[56]) / 100.0f;
+
+    Lidar_LastUpdateTick = HAL_GetTick();
+    if (previous_start_angle > 300.0f && start_angle < 60.0f) {
+        Lidar_ScanSequence++;
+    }
+    previous_start_angle = start_angle;
 
     // 3. 计算这一帧的角度跨度 (必须处理跨越 0 度极点的情况)
     float diff_angle = stop_angle - start_angle;

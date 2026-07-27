@@ -57,6 +57,35 @@
 
 #define MAX_POINTS 360 
 
+/*
+ * Side-sweep person safety gate.
+ * Original near-distance thresholds still control normal edge reversal.
+ * This wider zone only reacts to a persistent object that appears closer than
+ * the recent scan background, so a static wall does not add an extra stop.
+ */
+#define PERSON_WARN_DISTANCE_MM          900U
+#define PERSON_NEW_POINT_DISTANCE_MM     700U
+#define PERSON_INTRUSION_DELTA_MM        120U
+#define PERSON_MIN_CLUSTER_POINTS        3U
+#define PERSON_CONFIRM_SCANS             2U
+#define PERSON_CLEAR_SCANS               4U
+#define PERSON_LIDAR_TIMEOUT_MS           350U
+#define PERSON_WAIT_POLL_MS               20U
+
+typedef enum {
+    SIDE_SAFETY_LEFT = 0,
+    SIDE_SAFETY_RIGHT = 1
+} SideSafetyDirection_t;
+
+typedef struct {
+    uint16_t reference_distance[360];
+    uint32_t last_scan_sequence;
+    uint8_t suspect_scans;
+    SideSafetyDirection_t direction;
+} SideSafetyMonitor_t;
+
+static SideSafetyMonitor_t side_safety_monitor;
+
 typedef struct {
     float x;
     float y;
@@ -292,6 +321,165 @@ void STOP_SWEEPER(void)
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_RESET); 
 }
 
+static void SideSafety_GetAngleRange(SideSafetyDirection_t direction,
+                                     uint16_t *start_angle,
+                                     uint16_t *end_angle)
+{
+    if (direction == SIDE_SAFETY_RIGHT) {
+        *start_angle = 55U;
+        *end_angle = 125U;
+    } else {
+        *start_angle = 235U;
+        *end_angle = 305U;
+    }
+}
+
+static void SideSafety_CopyReference(SideSafetyMonitor_t *monitor)
+{
+    uint16_t start_angle;
+    uint16_t end_angle;
+    SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
+
+    for (uint16_t angle = start_angle; angle <= end_angle; angle++) {
+        uint16_t distance = Lidar_Distance_Array[angle];
+        if (distance > 0U) {
+            monitor->reference_distance[angle] = distance;
+        }
+    }
+}
+
+static void SideSafety_Init(SideSafetyMonitor_t *monitor,
+                            SideSafetyDirection_t direction)
+{
+    memset(monitor, 0, sizeof(*monitor));
+    monitor->direction = direction;
+    monitor->last_scan_sequence = Lidar_ScanSequence;
+    SideSafety_CopyReference(monitor);
+}
+
+static uint8_t SideSafety_MaxIntrusionRun(const SideSafetyMonitor_t *monitor)
+{
+    uint16_t start_angle;
+    uint16_t end_angle;
+    uint8_t current_run = 0U;
+    uint8_t max_run = 0U;
+    SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
+
+    for (uint16_t angle = start_angle; angle <= end_angle; angle++) {
+        uint16_t current = Lidar_Distance_Array[angle];
+        uint16_t reference = monitor->reference_distance[angle];
+        bool is_intrusion = false;
+
+        if (current > 0U && current <= PERSON_WARN_DISTANCE_MM) {
+            if (reference > current &&
+                (uint16_t)(reference - current) >= PERSON_INTRUSION_DELTA_MM) {
+                is_intrusion = true;
+            } else if (reference == 0U &&
+                       current <= PERSON_NEW_POINT_DISTANCE_MM) {
+                is_intrusion = true;
+            }
+        }
+
+        if (is_intrusion) {
+            current_run++;
+            if (current_run > max_run) {
+                max_run = current_run;
+            }
+        } else {
+            current_run = 0U;
+        }
+    }
+
+    return max_run;
+}
+
+static bool SideSafety_NewScanReady(SideSafetyMonitor_t *monitor)
+{
+    uint32_t sequence = Lidar_ScanSequence;
+    if (sequence == monitor->last_scan_sequence) {
+        return false;
+    }
+
+    monitor->last_scan_sequence = sequence;
+    return true;
+}
+
+static bool SideSafety_PersonConfirmed(SideSafetyMonitor_t *monitor)
+{
+    if (!SideSafety_NewScanReady(monitor)) {
+        return false;
+    }
+
+    if ((HAL_GetTick() - Lidar_LastUpdateTick) > PERSON_LIDAR_TIMEOUT_MS) {
+        monitor->suspect_scans = 0U;
+        return false;
+    }
+
+    if (SideSafety_MaxIntrusionRun(monitor) >= PERSON_MIN_CLUSTER_POINTS) {
+        if (monitor->suspect_scans < PERSON_CONFIRM_SCANS) {
+            monitor->suspect_scans++;
+        }
+    } else {
+        monitor->suspect_scans = 0U;
+        SideSafety_CopyReference(monitor);
+    }
+
+    return monitor->suspect_scans >= PERSON_CONFIRM_SCANS;
+}
+
+static void SideSafety_ResumeSweep(SideSafetyDirection_t direction,
+                                   const ChassisMsg_t *resume_command)
+{
+    if (direction == SIDE_SAFETY_RIGHT) {
+        START2_SWEEPER();
+    } else {
+        START1_SWEEPER();
+    }
+    osMessageQueuePut(ChassisQueueHandle, resume_command, 0, 0);
+}
+
+static void SideSafety_WaitUntilClear(SideSafetyMonitor_t *monitor,
+                                      const ChassisMsg_t *resume_command)
+{
+    uint8_t clear_scans = 0U;
+
+    Robot_Stop();
+    osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+    STOP_SWEEPER();
+    printf("[PERSON] Side intrusion confirmed, stop and wait.\r\n");
+
+    while (clear_scans < PERSON_CLEAR_SCANS) {
+        osDelay(PERSON_WAIT_POLL_MS);
+
+        if (!SideSafety_NewScanReady(monitor)) {
+            continue;
+        }
+
+        if ((HAL_GetTick() - Lidar_LastUpdateTick) > PERSON_LIDAR_TIMEOUT_MS) {
+            clear_scans = 0U;
+            continue;
+        }
+
+        if (SideSafety_MaxIntrusionRun(monitor) < PERSON_MIN_CLUSTER_POINTS) {
+            clear_scans++;
+        } else {
+            clear_scans = 0U;
+        }
+    }
+
+    printf("[PERSON] Safety area clear, resume interrupted side sweep.\r\n");
+    monitor->suspect_scans = 0U;
+    SideSafety_CopyReference(monitor);
+    SideSafety_ResumeSweep(monitor->direction, resume_command);
+}
+
+static void SideSafety_Process(SideSafetyMonitor_t *monitor,
+                               const ChassisMsg_t *resume_command)
+{
+    if (SideSafety_PersonConfirmed(monitor)) {
+        SideSafety_WaitUntilClear(monitor, resume_command);
+    }
+}
 void AutoClimb_Process(void)
 {
       printf("\r\n========================================\r\n");
@@ -576,6 +764,7 @@ void AutoClimb_Process(void)
               printf("   ▶ S型: 麦轮右移 (全局航向锁定中)...\r\n");
               START2_SWEEPER(); 
               int side_retry1 = 0; 
+              SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_RIGHT);
               while (1) {
                   // 🌟 你的逻辑：计算偏航误差并动态生成纠偏指令
                   float current_yaw = IMU_Get_Yaw() * 57.29578f;
@@ -591,6 +780,9 @@ void AutoClimb_Process(void)
                   osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                   osDelay(50);
+                  if (!(right_min > 0 && right_min <= LIDAR_RIGHT_WALL_MIN_DIST)) {
+                      SideSafety_Process(&side_safety_monitor, &move_cmd);
+                  }
                   
                   if (++side_retry1 % 10 == 0) {
                       __HAL_UART_CLEAR_OREFLAG(&huart2);
@@ -667,6 +859,7 @@ void AutoClimb_Process(void)
               osMessageQueuePut(ChassisQueueHandle, &msg_left, 0, 0); 
               START1_SWEEPER(); 
               int side_retry2 = 0; 
+              SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_LEFT);
               while (1) {
                   // 🌟 你的逻辑：左移纠偏
                   float current_yaw = IMU_Get_Yaw() * 57.29578f;
@@ -681,6 +874,9 @@ void AutoClimb_Process(void)
                   osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                   osDelay(50);
+                  if (!(right_min > 0 && right_min >= LIDAR_RIGHT_PLATFORM_LIMIT)) {
+                      SideSafety_Process(&side_safety_monitor, &move_cmd);
+                  }
                   if (++side_retry2 % 10 == 0) {
                       __HAL_UART_CLEAR_OREFLAG(&huart2);
                       __HAL_UART_CLEAR_FEFLAG(&huart2);
@@ -931,9 +1127,11 @@ void AutoClimb_Process(void)
       // ==========================================================
       printf("▶ 动作 5: 麦轮开始左移...\r\n");
       START1_SWEEPER(); 
+      SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_LEFT);
       osMessageQueuePut(ChassisQueueHandle, &msg_left, 0, 0);
       
       while (left_min > LIDAR_LEFT_STOP_DIST || left_min <= 0) { 
+          SideSafety_Process(&side_safety_monitor, &msg_left);
           printf("🎯 [雷达监控-左侧] 当前距离: %d mm\r\n", left_min);
           osDelay(100); 
       }
@@ -946,9 +1144,11 @@ void AutoClimb_Process(void)
       // ==========================================================
       printf("▶ 动作 7: 麦轮开始右移...\r\n");
       START2_SWEEPER(); 
+      SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_RIGHT);
       osMessageQueuePut(ChassisQueueHandle, &msg_right, 0, 0);
       
       while (right_min > LIDAR_RIGHT_STOP_DIST || right_min <= 0) { 
+          SideSafety_Process(&side_safety_monitor, &msg_right);
           printf("🎯 [雷达监控-右侧] 当前距离: %d mm\r\n", right_min);
           osDelay(100); 
       }

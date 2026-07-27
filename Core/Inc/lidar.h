@@ -15,6 +15,8 @@ extern "C" {
  * 索引 0~359 对应角度，值为距离 (mm)。
  */
 extern uint16_t Lidar_Distance_Array[360];
+extern volatile uint32_t Lidar_ScanSequence;
+extern volatile uint32_t Lidar_LastUpdateTick;
 
 /**
  * @brief 避障常用的方向最小距离变量
