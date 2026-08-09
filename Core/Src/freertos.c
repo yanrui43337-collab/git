@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include "stdio.h"
+#include "debug_log.h"
 #include "pid.h"
 #include "Emm_V5.h"
 #include <stdbool.h>
@@ -43,6 +44,11 @@ extern uint8_t Lidar_RxBuf[640];
 extern uint16_t Lidar_WriteIndex;
 extern uint16_t Lidar_ReadIndex;
 extern void Lidar_ParseSingleFrame(uint8_t *frame);
+extern void Lidar_Init(void);
+extern HAL_StatusTypeDef Lidar_RestartDMA(void);
+extern HAL_StatusTypeDef Ultrasonic_UART_Restart(void);
+extern void STOP_SWEEPER(void);
+extern void AutoClimb_Process(void);
 
 
 // 🌟 为自动爬楼任务引入外部传感器变量和底层函数
@@ -158,7 +164,7 @@ osThreadId_t SensorTaskHandle;
 const osThreadAttr_t SensorTask_attributes = {
   .name = "SensorTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for ChassisQueue */
 osMessageQueueId_t ChassisQueueHandle;
@@ -174,6 +180,12 @@ const osMessageQueueAttr_t StepperQueue_attributes = {
 osMutexId_t Mutex_StepperHandle;
 const osMutexAttr_t Mutex_Stepper_attributes = {
   .name = "Mutex_Stepper"
+};
+/* Definitions for Mutex_Debug */
+osMutexId_t Mutex_DebugHandle;
+const osMutexAttr_t Mutex_Debug_attributes = {
+  .name = "Mutex_Debug",
+  .attr_bits = osMutexPrioInherit
 };
 /* Definitions for Sem_BtRx */
 osSemaphoreId_t Sem_BtRxHandle;
@@ -213,16 +225,19 @@ void MX_FREERTOS_Init(void) {
   /* creation of Mutex_Stepper */
   Mutex_StepperHandle = osMutexNew(&Mutex_Stepper_attributes);
 
+  /* creation of Mutex_Debug */
+  Mutex_DebugHandle = osMutexNew(&Mutex_Debug_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
 
   /* Create the semaphores(s) */
   /* creation of Sem_BtRx */
-  Sem_BtRxHandle = osSemaphoreNew(1, 1, &Sem_BtRx_attributes);
+  Sem_BtRxHandle = osSemaphoreNew(1, 0, &Sem_BtRx_attributes);
 
   /* creation of Sem_SensorRx */
-  Sem_SensorRxHandle = osSemaphoreNew(1, 1, &Sem_SensorRx_attributes);
+  Sem_SensorRxHandle = osSemaphoreNew(1, 0, &Sem_SensorRx_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -283,7 +298,8 @@ void StartCommTask(void *argument)
   extern uint32_t last_bt_heartbeat;   // 引用 main.c 里的看门狗时间戳
   static bool is_bt_connected = false; // 记录当前蓝牙连接状态
 
-  osThreadSuspend(AutoClimbTaskHandle); 
+  osThreadSuspend(AutoClimbTaskHandle);
+  printf("[RTOS] Scheduler started; Bluetooth control is ready.\r\n");
   
   for(;;)
   {
@@ -414,6 +430,7 @@ void StartCommTask(void *argument)
               HAL_UARTEx_ReceiveToIdle_IT(&huart4, (uint8_t *)bt_rx_buf, 64);
           }
       }
+		osDelay(1U);
   }
   /* USER CODE END StartCommTask */
 }
@@ -524,10 +541,8 @@ void StartStepperTask(void *argument)
   uint32_t last_print_time = 0; // 🌟 打印频率控制器
 	uint32_t last_ultra_trig_time = 0; // 🌟 新增：超声波触发限速器
 	
-	uint32_t last_poll_time = 0; // 🌟 1. 轮询时间戳
-  
   #define MOTOR_MIN_LIMIT    -80000       
-  #define MOTOR_MAX_LIMIT    2000000 
+  #define MOTOR_MAX_LIMIT    2120000 
 
   for(;;)
   {
@@ -678,6 +693,11 @@ void StartSensorTask(void *argument)
   extern int right_min;      
   extern int front_min;
 
+  /* Lidar is deliberately started after the scheduler. A noisy or faulty
+     lidar must never prevent Bluetooth and the safety tasks from starting. */
+  osDelay(10U);
+  Lidar_Init();
+
   for(;;)
   {
       // 🌟 核心修复 1：将 osWaitForever 改为 500！500ms 没收到数据说明雷达死了！
@@ -730,10 +750,15 @@ void StartSensorTask(void *argument)
       {
           // 🌟 核心修复 2：超时触发！强制打断卡死的串口，重新唤醒雷达 DMA 通道！
           printf("🚨 [警告] 雷达数据停更超时，尝试强行重启 DMA 通道！\r\n");
-          extern UART_HandleTypeDef huart2;
-          HAL_UART_AbortReceive(&huart2);
-          __HAL_UART_CLEAR_OREFLAG(&huart2);
-          HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
+          HAL_StatusTypeDef lidar_status = Lidar_RestartDMA();
+          if (lidar_status == HAL_OK)
+          {
+              printf("✅ 雷达 DMA 通道重启成功！\r\n");
+          }
+          else
+          {
+              printf("🚨 雷达 DMA 通道重启失败，错误码: %d\r\n", lidar_status);
+          }
       }
   }
   /* USER CODE END StartSensorTask */
@@ -757,13 +782,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
     else if (huart->Instance == UART5)
     {
-        __HAL_UART_CLEAR_OREFLAG(huart);
-        __HAL_UART_CLEAR_FEFLAG(huart);
-        __HAL_UART_CLEAR_NEFLAG(huart);
-        __HAL_UART_CLEAR_PEFLAG(huart);
-        
-        extern uint8_t ultra_rx_buf[];
-        HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16);
+        (void)Ultrasonic_UART_Restart();
     }
     // 👇 新增：给蓝牙(UART4)也颁发“不死金牌”！防止任何开机乱码导致死锁！
     else if (huart->Instance == UART4)
@@ -783,7 +802,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         __HAL_UART_CLEAR_FEFLAG(huart);
         __HAL_UART_CLEAR_NEFLAG(huart);
         __HAL_UART_CLEAR_PEFLAG(huart);
-        // 注意：因为是 Circular DMA，这里不需要重启接收，清掉标志位让它继续跑就行
+        // 阻塞型串口错误会终止 DMA；SensorTask 超时后统一调用 Lidar_RestartDMA()。
     }
 }
 

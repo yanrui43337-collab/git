@@ -31,6 +31,8 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include "stdio.h"
+#include "debug_log.h"
+#include <stdarg.h>
 #include "pid.h"
 #include "Emm_V5.h"
 #include <stdbool.h>
@@ -38,6 +40,8 @@
 #include <Robot_control.h>
 #include <ultrasonic_uart.h>
 #include <stdlib.h>
+#include "brushless_esc.h"
+#include "water_pump.h"
 
 
 /* USER CODE END Includes */
@@ -161,79 +165,11 @@ int main(void)
   MX_TIM16_Init();
   MX_TIM17_Init();
   /* USER CODE BEGIN 2 */
-	
-				printf("\r\n\r\n⏳ 系统上电，等待外设模块开机初始化...\r\n");
-        HAL_Delay(1000); // 强行挂起 1 秒钟，让蓝牙、雷达、步进电机全部满血物理开机！
 
-        // 1. 🌟 核心调换：必须先“竖起耳朵”，再去发指令！
-        // 提前打开监听，把蓝牙开机时的碎语和 AT 指令的回复全部安全吃掉！
-        HAL_UART_AbortReceive(&huart4);
-        __HAL_UART_CLEAR_OREFLAG(&huart4);
-        if (HAL_UARTEx_ReceiveToIdle_IT(&huart4, bt_rx_buf, 64) != HAL_OK) {
-            printf("🚨 蓝牙 UART4 监听开启失败！\r\n");
-        } else {
-            printf("✅ 蓝牙 UART4 监听开启成功！\r\n");
-        }
-				
-				// 2. 耳朵准备好之后，发送蓝牙断开连接的 AT 指令
-        char *disconnect_cmd = "AT+DISC\r\n"; 
-        HAL_UART_Transmit(&huart4, (uint8_t *)disconnect_cmd, strlen(disconnect_cmd), 100);
-        
-        // 3. 等待断开动作处理完成
-        HAL_Delay(500);
-		
-	
-		HAL_TIM_PWM_Init(&htim1);
-		HAL_TIM_PWM_Init(&htim2);
-    // 开启 UART8 的中断接收（每收到 1 个字节进一次中断）
-   // 开启 UART8 的中断接收前，先清空可能因为延时产生的 ORE 垃圾标志！
-    HAL_UART_AbortReceive(&huart8);    
-    __HAL_UART_CLEAR_OREFLAG(&huart8); 
-    __HAL_UART_CLEAR_NEFLAG(&huart8);  
-    __HAL_UART_CLEAR_FEFLAG(&huart8);  
-    HAL_UART_Receive_IT(&huart8, &imu_rx_byte, 1);
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // M1: PE9
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); // M1: PE11
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3); // M1: PE13
-		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); // M2: PE14
-		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1); // M2: PA5
-		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2); // M2: PB3
-		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // M2: PA2
-		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4); // M2: PA3
-		HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_2);    //PE6
-		HAL_TIMEx_PWMN_Start(&htim16, TIM_CHANNEL_1);    // 启动 TIM16 互补通道 1N (注意有 Ex 和 N)
-    HAL_TIMEx_PWMN_Start(&htim17, TIM_CHANNEL_1);    // 启动 TIM17 互补通道 1N (注意有 Ex 和 N)
-		HAL_UART_Receive_IT(&huart2, &aRxBuffer, 1);
-		HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
-    HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
-		HAL_TIM_Encoder_Start(&htim5, TIM_CHANNEL_ALL);
-		HAL_TIM_Encoder_Start(&htim8, TIM_CHANNEL_ALL);
-		
-    // 2. 【新增】以中断模式启动 TIM6，秒表开始计时！
-    HAL_TIM_Base_Start_IT(&htim6);
-		
-		// 👇 补充 1：超声波初始化
-		Ultrasonic_UART_Init();	
-		
-		// 🌟 核心修复：强行开启超声波 UART5 的 IT 空闲中断接收！(防止没开启导致一直是 -1)
-		// 🌟 核心修复：先打断所有可能在 Init 里卡住的接收状态，清空追尾标志，再重新开启！
-		extern uint8_t ultra_rx_buf[];
-		HAL_UART_AbortReceive(&huart5);    // 强制打断卡死状态
-		__HAL_UART_CLEAR_OREFLAG(&huart5); // 清除追尾标志
-		
-		if (HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, 16) != HAL_OK) {
-				// 把 ErrorCode 打印出来，万一再错我们直接看代码抓鬼
-				printf("🚨 超声波串口监听开启失败！错误码: %d\n", huart5.ErrorCode);
-		} else {
-				printf("✅ 超声波串口 IT 监听开启成功！\r\n");
-		}
-				
-		//雷达
-		Lidar_Init();
-		
-		// 确保在 while(1) 之前，敲响一次雷达的 DMA 接收！
-		HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
-		
+		/* Safety first: request an immediate stop, then let the stepper drive boot. */
+		Emm_V5_Stop_Now(1, false);
+		HAL_Delay(1000);
+
 		// =======================================================
 		// 🌟 步进电机终极安全初始化序列 (闭环防暴走版) 🌟
 		// =======================================================
@@ -277,6 +213,56 @@ int main(void)
 		Emm_V5_Auto_Return_Sys_Params_Timed(1, S_CPOS, 20);
 		HAL_Delay(100); 
 		// =======================================================
+	
+				printf("\r\n\r\n⏳ 系统上电，等待外设模块开机初始化...\r\n");
+
+        // 1. 🌟 核心调换：必须先“竖起耳朵”，再去发指令！
+        // 提前打开监听，把蓝牙开机时的碎语和 AT 指令的回复全部安全吃掉！
+        HAL_UART_AbortReceive(&huart4);
+        __HAL_UART_CLEAR_OREFLAG(&huart4);
+        if (HAL_UARTEx_ReceiveToIdle_IT(&huart4, bt_rx_buf, 64) != HAL_OK) {
+            printf("🚨 蓝牙 UART4 监听开启失败！\r\n");
+        } else {
+            printf("✅ 蓝牙 UART4 监听开启成功！\r\n");
+        }
+				
+				// 2. 耳朵准备好之后，发送蓝牙断开连接的 AT 指令
+        char *disconnect_cmd = "AT+DISC\r\n"; 
+        HAL_UART_Transmit(&huart4, (uint8_t *)disconnect_cmd, strlen(disconnect_cmd), 100);
+        
+        // 3. 等待断开动作处理完成
+        HAL_Delay(500);
+		
+	
+		HAL_TIM_PWM_Init(&htim1);
+		HAL_TIM_PWM_Init(&htim2);
+    // 开启 UART8 的中断接收（每收到 1 个字节进一次中断）
+   // 开启 UART8 的中断接收前，先清空可能因为延时产生的 ORE 垃圾标志！
+    HAL_UART_AbortReceive(&huart8);    
+    __HAL_UART_CLEAR_OREFLAG(&huart8); 
+    __HAL_UART_CLEAR_NEFLAG(&huart8);  
+    __HAL_UART_CLEAR_FEFLAG(&huart8);  
+    HAL_UART_Receive_IT(&huart8, &imu_rx_byte, 1);
+		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // M1: PE9
+		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); // M1: PE11
+		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3); // M1: PE13
+		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); // M2: PE14
+		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1); // M2: PA5
+		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2); // M2: PB3
+		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3); // M2: PA2
+		HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4); // M2: PA3
+		HAL_TIMEx_PWMN_Start(&htim16, TIM_CHANNEL_1);    // 启动 TIM16 互补通道 1N (注意有 Ex 和 N)
+    HAL_TIMEx_PWMN_Start(&htim17, TIM_CHANNEL_1);    // 启动 TIM17 互补通道 1N (注意有 Ex 和 N)
+		HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+    HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+		HAL_TIM_Encoder_Start(&htim5, TIM_CHANNEL_ALL);
+		HAL_TIM_Encoder_Start(&htim8, TIM_CHANNEL_ALL);
+		
+    // 2. 【新增】以中断模式启动 TIM6，秒表开始计时！
+    HAL_TIM_Base_Start_IT(&htim6);
+		
+		// 👇 补充 1：超声波初始化
+		Ultrasonic_UART_Init();	
 		
 		/* USER CODE BEGIN 2 */
   
@@ -295,6 +281,16 @@ int main(void)
   HAL_Delay(200); 
   
   printf("✅ IMU 6轴配置指令发送完毕！\r\n");
+
+		if (WaterPump_Init() != HAL_OK) {             // PE6 / TIM15_CH2, PD10 low
+			Error_Handler();
+		}
+		if (WaterPump_Start(20U) != HAL_OK) {         // Default pump speed: 20% duty
+			Error_Handler();
+		}
+		if (Brushless_ESC_Init() != HAL_OK) {         // PE5 / TIM15_CH1, PD10 low
+			Error_Handler();
+		}
 
   /* USER CODE END 2 */
 
@@ -379,10 +375,91 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+extern osMutexId_t Mutex_DebugHandle;
+static char debug_tx_buffer[512];
+
+int Debug_Printf(const char *format, ...)
+{
+    va_list args;
+    int formatted_length;
+    uint16_t transmit_length;
+    uint8_t mutex_locked = 0U;
+    osKernelState_t kernel_state;
+
+    /* Logging from an interrupt would make an RTOS mutex illegal. */
+    if ((format == NULL) || (__get_IPSR() != 0U))
+    {
+        return 0;
+    }
+
+    kernel_state = osKernelGetState();
+    if (kernel_state == osKernelRunning)
+    {
+        if ((Mutex_DebugHandle == NULL) ||
+            (osMutexAcquire(Mutex_DebugHandle, 100U) != osOK))
+        {
+            return 0;
+        }
+        mutex_locked = 1U;
+    }
+
+    va_start(args, format);
+    formatted_length = vsnprintf(debug_tx_buffer,
+                                 sizeof(debug_tx_buffer),
+                                 format,
+                                 args);
+    va_end(args);
+
+    if (formatted_length < 0)
+    {
+        transmit_length = 0U;
+    }
+    else if ((uint32_t)formatted_length >= sizeof(debug_tx_buffer))
+    {
+        transmit_length = (uint16_t)(sizeof(debug_tx_buffer) - 1U);
+    }
+    else
+    {
+        transmit_length = (uint16_t)formatted_length;
+    }
+
+    if (transmit_length > 0U)
+    {
+        (void)HAL_UART_Transmit(&huart1,
+                               (uint8_t *)debug_tx_buffer,
+                               transmit_length,
+                               100U);
+    }
+
+    if (mutex_locked != 0U)
+    {
+        (void)osMutexRelease(Mutex_DebugHandle);
+    }
+
+    return formatted_length;
+}
+
 int fputc(int ch, FILE *f)
 {
     uint8_t c = (uint8_t)ch;
-    HAL_UART_Transmit(&huart1, &c, 1, 1000);
+    uint8_t retry;
+
+    for (retry = 0U; retry < 5U; retry++)
+    {
+        if (HAL_UART_Transmit(&huart1, &c, 1, 20U) == HAL_OK)
+        {
+            break;
+        }
+
+        if (osKernelGetState() == osKernelRunning)
+        {
+            osDelay(1U);
+        }
+        else
+        {
+            HAL_Delay(1U);
+        }
+    }
     return ch;
 }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -449,11 +526,11 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         extern uint16_t Lidar_WriteIndex;
         
         SCB_InvalidateDCache_by_Addr((uint32_t *)Lidar_RxBuf, 640);
-        Lidar_WriteIndex = Size; 
+        Lidar_WriteIndex = (uint16_t)(Size % 640U);
         
         // 🌟 核心保命修复：防“中断早产”死机！
         // 必须确保操作系统已经启动、信号量已经被创建（不为空），才能按门铃！
-        if (Sem_SensorRxHandle != NULL) {
+        if ((Sem_SensorRxHandle != NULL) && (osKernelGetState() == osKernelRunning)) {
             osSemaphoreRelease(Sem_SensorRxHandle); 
         }
 			

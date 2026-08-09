@@ -1,4 +1,5 @@
 #include "ultrasonic_uart.h"
+#include "debug_log.h"
 #include "usart.h" // 包含 huart5 的定义
 #include <stdio.h> // 用于 debug 打印
 
@@ -8,10 +9,51 @@ static volatile int ultrasonic_distance = -1;
 // 串口接收缓冲区
 uint8_t ultra_rx_buf[16]; 
 
+HAL_StatusTypeDef Ultrasonic_UART_Restart(void)
+{
+    HAL_StatusTypeDef status;
+
+    HAL_NVIC_DisableIRQ(UART5_IRQn);
+    (void)HAL_UART_AbortReceive(&huart5);
+
+    __HAL_UART_CLEAR_OREFLAG(&huart5);
+    __HAL_UART_CLEAR_FEFLAG(&huart5);
+    __HAL_UART_CLEAR_NEFLAG(&huart5);
+    __HAL_UART_CLEAR_PEFLAG(&huart5);
+    __HAL_UART_CLEAR_IDLEFLAG(&huart5);
+    __HAL_UART_SEND_REQ(&huart5, UART_RXDATA_FLUSH_REQUEST);
+    HAL_NVIC_ClearPendingIRQ(UART5_IRQn);
+
+    status = HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, sizeof(ultra_rx_buf));
+    HAL_NVIC_EnableIRQ(UART5_IRQn);
+
+    return status;
+}
+
 // 初始化函数：开启 UART5 的空闲中断接收
 void Ultrasonic_UART_Init(void) 
 {
-    HAL_UARTEx_ReceiveToIdle_IT(&huart5, ultra_rx_buf, sizeof(ultra_rx_buf));
+    HAL_StatusTypeDef status = HAL_ERROR;
+    uint8_t attempt;
+
+    for (attempt = 0U; attempt < 3U; attempt++)
+    {
+        status = Ultrasonic_UART_Restart();
+        if (status == HAL_OK)
+        {
+            break;
+        }
+        HAL_Delay(20U);
+    }
+
+    if (status == HAL_OK)
+    {
+        printf("✅ 超声波串口 IT 监听开启成功！\r\n");
+    }
+    else
+    {
+        printf("🚨 超声波串口监听启动失败，错误码: %d\r\n", status);
+    }
 }
 
 // 获取距离接口 (供主循环调用)

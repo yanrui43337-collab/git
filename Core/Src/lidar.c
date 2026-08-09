@@ -24,6 +24,7 @@
 #include "math.h"
 #include <stdint.h>
 #include <stdio.h>
+#include "debug_log.h"
 #include "arm_math.h"  // 🌟 新增：必须引入 ARM DSP 库来加速三角函数！
 
 // --- 宏定义区 ---
@@ -64,15 +65,53 @@ int rear_min =0;   //后方最小距离
 extern UART_HandleTypeDef huart4; // 告诉编译器 huart4 在其他地方定义了（通常在 usart.c）
 
 // --- 1. 雷达初始化函数 (在 main.c 的 while(1) 之前调用) ---
+HAL_StatusTypeDef Lidar_RestartDMA(void)
+{
+    HAL_StatusTypeDef status;
+
+    /* The lidar streams before main() starts DMA, so stale UART errors must
+       be cleared atomically before enabling Receive-to-Idle DMA. */
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
+    (void)HAL_UART_AbortReceive(&huart2);
+
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    __HAL_UART_CLEAR_FEFLAG(&huart2);
+    __HAL_UART_CLEAR_NEFLAG(&huart2);
+    __HAL_UART_CLEAR_PEFLAG(&huart2);
+    __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+    __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);
+    HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
+
+    Lidar_WriteIndex = 0U;
+    Lidar_ReadIndex = 0U;
+    SCB_CleanInvalidateDCache_by_Addr((uint32_t *)Lidar_RxBuf, sizeof(Lidar_RxBuf));
+
+    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, sizeof(Lidar_RxBuf));
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+
+    return status;
+}
+
 void Lidar_Init(void)
 {
     HAL_StatusTypeDef status;
-    status = HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, 640);
+    uint8_t attempt;
+
+    status = HAL_ERROR;
+    for (attempt = 0U; attempt < 3U; attempt++)
+    {
+        status = Lidar_RestartDMA();
+        if (status == HAL_OK)
+        {
+            break;
+        }
+        HAL_Delay(20U);
+    }
     
     if(status != HAL_OK)
     {
         // 如果这里打印了，说明启动就失败了
-        printf("Lidar DMA Start Failed! Code: %d\n", status);
+        printf("Lidar DMA Start Failed after 3 attempts! Code: %d\n", status);
         // 如果 Code 是 2 (HAL_BUSY)，说明串口被占用了
         // 如果 Code 是 1 (HAL_ERROR)，通常是配置参数不匹配
     }

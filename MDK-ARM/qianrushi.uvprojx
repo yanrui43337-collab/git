@@ -338,9 +338,9 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls>--no_multibyte_chars</MiscControls>
-              <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H750xx</Define>
+              <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H750xx,ARM_MATH_CM7</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;D:/keil5/ARM/pack/ARM/CMSIS/5.9.0/CMSIS/DSP/Include;D:/keil5/ARM/pack/ARM/CMSIS/5.9.0/CMSIS/DSP/PrivateInclude</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -440,9 +440,34 @@
               <FilePath>..\Core\Src\auto_climb.c</FilePath>
             </File>
             <File>
+              <FileName>brushless_esc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\brushless_esc.c</FilePath>
+            </File>
+            <File>
+              <FileName>water_pump.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\water_pump.c</FilePath>
+            </File>
+            <File>
+              <FileName>arm_sin_f32.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>D:\keil5\ARM\pack\ARM\CMSIS\5.9.0\CMSIS\DSP\Source\FastMathFunctions\arm_sin_f32.c</FilePath>
+            </File>
+            <File>
+              <FileName>arm_cos_f32.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>D:\keil5\ARM\pack\ARM\CMSIS\5.9.0\CMSIS\DSP\Source\FastMathFunctions\arm_cos_f32.c</FilePath>
+            </File>
+            <File>
+              <FileName>arm_common_tables.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>D:\keil5\ARM\pack\ARM\CMSIS\5.9.0\CMSIS\DSP\Source\CommonTables\arm_common_tables.c</FilePath>
+            </File>
+            <File>
               <FileName>my_imu.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\..\..\..\对方看啥\原使用代码\qianrushi\Core\Src\my_imu.c</FilePath>
+              <FilePath>..\Core\Src\my_imu.c</FilePath>
             </File>
             <File>
               <FileName>main.c</FileName>

@@ -4,6 +4,7 @@
 #include "cmsis_os2.h"
 #include <string.h>
 #include "stdio.h"
+#include "debug_log.h"
 #include "Emm_V5.h"
 #include <stdbool.h>
 #include <lidar.h>
@@ -15,29 +16,29 @@
 /* ========================================================== */
 /* ==================== 1. 宏定义区域 ======================= */
 /* ========================================================== */
-#define AUTO_TARGET_UP       2000000   // 步进电机上升目标脉冲数（台阶高度）
+#define AUTO_TARGET_UP       2120000   // 步进电机上升目标脉冲数（台阶高度）
 #define AUTO_TARGET_DOWN     -80000    // 步进电机下降目标脉冲数（底盘着地）
 #define ULTRA_STOP_DIST      50        // 超声波停止直行距离（贴紧台阶）
 #define ULTRA_STEP_FWD_DIST  125       // 超声波安全爬坡前进距离 
 
-#define LIDAR_LEFT_STOP_DIST       440   // 避障/对齐：雷达左侧安全停止距离
-#define LIDAR_RIGHT_STOP_DIST      480   // 避障/对齐：雷达右侧安全停止距离
-#define LIDAR_RIGHT_WALL_MIN_DIST  440   // S型扫平：右侧贴墙最小距离（换轨标志）
+#define LIDAR_LEFT_STOP_DIST       440    // 避障/对齐：雷达左侧安全停止距离
+#define LIDAR_RIGHT_STOP_DIST      480    // 避障/对齐：雷达右侧安全停止距离
+#define LIDAR_RIGHT_WALL_MIN_DIST  440    // S型扫平：右侧贴墙最小距离（换轨标志）
 #define LIDAR_RIGHT_PLATFORM_LIMIT 1150   // S型扫平：右侧平台边缘极限距离（防跌落）
-#define ROBOT_FWD_STEP_DIST        190   // S型扫平：每次换轨前行的精准物理距离 (已按你要求改大至 200)
+#define ROBOT_FWD_STEP_DIST        190    // S型扫平：每次换轨前行的精准物理距离 (已按你要求改大至 200)
 #define PLATFORM_FRONT_END_DIST    580    // S型扫平终极目标，离前方墙壁 40mm 结束清扫
 
-#define ULTRA_PLATFORM_DETECT  1600      // 核心标志：超声波突变阈值（大于此值判定前方是空旷平台）
+#define ULTRA_PLATFORM_DETECT  1600       // 核心标志：超声波突变阈值（大于此值判定前方是空旷平台）
 
-#define LIDAR_LAST_STEP_DIST    1770  	 // 核心判定：后轮登顶台阶时，车头雷达距离前方墙壁的距离
-#define LIDAR_PRE_TURN_TARGET   1240  	 // 核心安全：旋转前直行，驶离台阶边缘的安全避开距离
+#define LIDAR_LAST_STEP_DIST    1770  	  // 核心判定：后轮登顶台阶时，车头雷达距离前方墙壁的距离
+#define LIDAR_PRE_TURN_TARGET   1240  	  // 核心安全：旋转前直行，驶离台阶边缘的安全避开距离
 
-#define CRAWLER_FWD_SPEED      6000      // 爬坡履带前进基准速度
-#define CRAWLER_REV_SPEED      -6000     // 爬坡履带后退基准速度
+#define CRAWLER_FWD_SPEED      6000       // 爬坡履带前进基准速度
+#define CRAWLER_REV_SPEED      -6000      // 爬坡履带后退基准速度
 
 
 // ==========================================================
-// 🌟 平台清扫防撞：人腿/墙壁几何特征提取算法
+//   平台清扫防撞：人腿/墙壁几何特征提取算法
 // ==========================================================
 #include "arm_math.h"
 
@@ -69,8 +70,11 @@
 #define PERSON_MIN_CLUSTER_POINTS        3U
 #define PERSON_CONFIRM_SCANS             2U
 #define PERSON_CLEAR_SCANS               4U
-#define PERSON_LIDAR_TIMEOUT_MS           350U
-#define PERSON_WAIT_POLL_MS               20U
+#define PERSON_LIDAR_TIMEOUT_MS          350U
+#define PERSON_WAIT_POLL_MS              20U
+
+// 普通台阶左移人员侵入检测开关：现场栅栏误报时改为 0，右侧检测不受影响。
+#define ENABLE_STAIR_LEFT_PERSON_SAFETY  0
 
 typedef enum {
     SIDE_SAFETY_LEFT = 0,
@@ -275,7 +279,6 @@ extern void Motor_Contro2(int m1_speed, int m2_speed, int m3_speed, int m4_speed
 
 static ChassisMsg_t msg_stop  = {0, 0, 0};
 static ChassisMsg_t msg_fwd   = {50, 0, 0};   
-static ChassisMsg_t msg_rev   = {-50, 0, 0};  
 static ChassisMsg_t msg_left  = {5, -90, 0};  
 static ChassisMsg_t msg_right = {5, 90, 0};   
 static int stepper_cmd = 0;
@@ -284,7 +287,35 @@ extern TIM_HandleTypeDef htim15;
 extern TIM_HandleTypeDef htim16;
 extern TIM_HandleTypeDef htim17;
 extern float IMU_Get_Yaw(void); 
-extern UART_HandleTypeDef huart2;  // 🌟 全局声明雷达串口，方便随时施放复活甲
+extern UART_HandleTypeDef huart2;  // 全局声明雷达串口，方便随时施放复活甲
+
+static ChassisMsg_t Build_Yaw_Locked_Command(const ChassisMsg_t *base_command,
+                                              float locked_yaw,
+                                              float kp,
+                                              float *yaw_error_out)
+{
+    float current_yaw = IMU_Get_Yaw() * 57.29578f;
+    float yaw_error = locked_yaw - current_yaw;
+    int compensation_w;
+    ChassisMsg_t corrected_command;
+
+    if (yaw_error > 180.0f) yaw_error -= 360.0f;
+    if (yaw_error < -180.0f) yaw_error += 360.0f;
+
+    compensation_w = (int)(kp * yaw_error);
+    if (compensation_w > 30) compensation_w = 30;
+    if (compensation_w < -30) compensation_w = -30;
+
+    corrected_command.x = base_command->x;
+    corrected_command.y = base_command->y;
+    corrected_command.w = -compensation_w;
+
+    if (yaw_error_out != NULL) {
+        *yaw_error_out = yaw_error;
+    }
+
+    return corrected_command;
+}
 
 void START1_SWEEPER(void)
 {
@@ -764,26 +795,16 @@ void AutoClimb_Process(void)
               printf("   ▶ S型: 麦轮右移 (全局航向锁定中)...\r\n");
               START2_SWEEPER(); 
               int side_retry1 = 0; 
-              SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_RIGHT);
               while (1) {
-                  // 🌟 你的逻辑：计算偏航误差并动态生成纠偏指令
-                  float current_yaw = IMU_Get_Yaw() * 57.29578f;
-                  float err = platform_locked_yaw - current_yaw;
-                  if (err > 180.0f) err -= 360.0f; 
-                  if (err < -180.0f) err += 360.0f;
-                  
-                  int comp_w = (int)(Kp_lateral * err);
-                  if (comp_w > 30) comp_w = 30; if (comp_w < -30) comp_w = -30;
-                  
                   // 发送复合指令 (右移 + 纠偏)
-                  ChassisMsg_t move_cmd = {msg_right.x, msg_right.y, -comp_w};
+                  float err = 0.0f;
+                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_right,
+                                                                   platform_locked_yaw,
+                                                                   Kp_lateral,
+                                                                   &err);
                   osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                   osDelay(50);
-                  if (!(right_min > 0 && right_min <= LIDAR_RIGHT_WALL_MIN_DIST)) {
-                      SideSafety_Process(&side_safety_monitor, &move_cmd);
-                  }
-                  
                   if (++side_retry1 % 10 == 0) {
                       __HAL_UART_CLEAR_OREFLAG(&huart2);
                       __HAL_UART_CLEAR_FEFLAG(&huart2);
@@ -821,16 +842,12 @@ void AutoClimb_Process(void)
               if (start_front_dist > PLATFORM_FRONT_END_DIST && start_front_dist < 4000) {
                   int timeout_count = 0;
                   while (1) {
-                      // 🌟 你的逻辑：换轨前进同样加入纠偏
-                      float current_yaw = IMU_Get_Yaw() * 57.29578f;
-                      float err = platform_locked_yaw - current_yaw;
-                      if (err > 180.0f) err -= 360.0f; 
-                      if (err < -180.0f) err += 360.0f;
-                      int comp_w = (int)(Kp_lateral * err);
-                      if (comp_w > 30) comp_w = 30; if (comp_w < -30) comp_w = -30;
-                      
                       // 发送复合指令 (前进 + 纠偏)
-                      ChassisMsg_t move_cmd = {msg_fwd.x, msg_fwd.y, -comp_w};
+                      float err = 0.0f;
+                      ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_fwd,
+                                                                       platform_locked_yaw,
+                                                                       Kp_lateral,
+                                                                       &err);
                       osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                       osDelay(50);
@@ -859,24 +876,16 @@ void AutoClimb_Process(void)
               osMessageQueuePut(ChassisQueueHandle, &msg_left, 0, 0); 
               START1_SWEEPER(); 
               int side_retry2 = 0; 
-              SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_LEFT);
               while (1) {
-                  // 🌟 你的逻辑：左移纠偏
-                  float current_yaw = IMU_Get_Yaw() * 57.29578f;
-                  float err = platform_locked_yaw - current_yaw;
-                  if (err > 180.0f) err -= 360.0f; 
-                  if (err < -180.0f) err += 360.0f;
-                  int comp_w = (int)(Kp_lateral * err);
-                  if (comp_w > 30) comp_w = 30; if (comp_w < -30) comp_w = -30;
-                  
                   // 发送复合指令 (左移 + 纠偏)
-                  ChassisMsg_t move_cmd = {msg_left.x, msg_left.y, -comp_w};
+                  float err = 0.0f;
+                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_left,
+                                                                   platform_locked_yaw,
+                                                                   Kp_lateral,
+                                                                   &err);
                   osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                   osDelay(50);
-                  if (!(right_min > 0 && right_min >= LIDAR_RIGHT_PLATFORM_LIMIT)) {
-                      SideSafety_Process(&side_safety_monitor, &move_cmd);
-                  }
                   if (++side_retry2 % 10 == 0) {
                       __HAL_UART_CLEAR_OREFLAG(&huart2);
                       __HAL_UART_CLEAR_FEFLAG(&huart2);
@@ -914,16 +923,12 @@ void AutoClimb_Process(void)
               if (start_front_dist > PLATFORM_FRONT_END_DIST && start_front_dist < 4000) {
                   int timeout_count = 0;
                   while (1) {
-                      // 🌟 你的逻辑：第二次换轨同样加入纠偏
-                      float current_yaw = IMU_Get_Yaw() * 57.29578f;
-                      float err = platform_locked_yaw - current_yaw;
-                      if (err > 180.0f) err -= 360.0f; 
-                      if (err < -180.0f) err += 360.0f;
-                      int comp_w = (int)(Kp_lateral * err);
-                      if (comp_w > 30) comp_w = 30; if (comp_w < -30) comp_w = -30;
-                      
                       // 发送复合指令 (前进 + 纠偏)
-                      ChassisMsg_t move_cmd = {msg_fwd.x, msg_fwd.y, -comp_w};
+                      float err = 0.0f;
+                      ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_fwd,
+                                                                       platform_locked_yaw,
+                                                                       Kp_lateral,
+                                                                       &err);
                       osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 
                       osDelay(50);
@@ -1123,16 +1128,31 @@ void AutoClimb_Process(void)
       
       osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
       osDelay(500); 
+
+      // 普通台阶左右清扫共用同一个基准航向，停车或换向后不重新锁定。
+      float stair_locked_yaw = IMU_Get_Yaw() * 57.29578f;
+      float stair_lateral_kp = 0.5f;
+      printf("🎯 [普通台阶航向锁定] 左右移动基准角度: %.2f°\r\n", stair_locked_yaw);
        
       // ==========================================================
       printf("▶ 动作 5: 麦轮开始左移...\r\n");
       START1_SWEEPER(); 
+#if ENABLE_STAIR_LEFT_PERSON_SAFETY
       SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_LEFT);
-      osMessageQueuePut(ChassisQueueHandle, &msg_left, 0, 0);
+#endif
       
       while (left_min > LIDAR_LEFT_STOP_DIST || left_min <= 0) { 
-          SideSafety_Process(&side_safety_monitor, &msg_left);
-          printf("🎯 [雷达监控-左侧] 当前距离: %d mm\r\n", left_min);
+          float yaw_error = 0.0f;
+          ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_left,
+                                                           stair_locked_yaw,
+                                                           stair_lateral_kp,
+                                                           &yaw_error);
+          osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
+#if ENABLE_STAIR_LEFT_PERSON_SAFETY
+          SideSafety_Process(&side_safety_monitor, &move_cmd);
+#endif
+          printf("🎯 [雷达监控-左侧] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
+                 left_min, yaw_error);
           osDelay(100); 
       }
       
@@ -1145,11 +1165,17 @@ void AutoClimb_Process(void)
       printf("▶ 动作 7: 麦轮开始右移...\r\n");
       START2_SWEEPER(); 
       SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_RIGHT);
-      osMessageQueuePut(ChassisQueueHandle, &msg_right, 0, 0);
       
       while (right_min > LIDAR_RIGHT_STOP_DIST || right_min <= 0) { 
-          SideSafety_Process(&side_safety_monitor, &msg_right);
-          printf("🎯 [雷达监控-右侧] 当前距离: %d mm\r\n", right_min);
+          float yaw_error = 0.0f;
+          ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_right,
+                                                           stair_locked_yaw,
+                                                           stair_lateral_kp,
+                                                           &yaw_error);
+          osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
+          SideSafety_Process(&side_safety_monitor, &move_cmd);
+          printf("🎯 [雷达监控-右侧] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
+                 right_min, yaw_error);
           osDelay(100); 
       }
       
