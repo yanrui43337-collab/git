@@ -60,18 +60,40 @@
 
 /*
  * Side-sweep person safety gate.
- * Original near-distance thresholds still control normal edge reversal.
- * This wider zone only reacts to a persistent object that appears closer than
- * the recent scan background, so a static wall does not add an extra stop.
+ *
+ * The optional left-side path retains the original scan-background method.
+ * The active right-side path uses a complete lidar revolution, estimates the
+ * right wall, and only evaluates compact foreground clusters inside the
+ * vehicle's local stair ROI.  This prevents rear stair/wall points and stale
+ * angular bins from keeping the robot stopped after a person leaves.
  */
-#define PERSON_WARN_DISTANCE_MM          900U
-#define PERSON_NEW_POINT_DISTANCE_MM     700U
-#define PERSON_INTRUSION_DELTA_MM        120U
-#define PERSON_MIN_CLUSTER_POINTS        3U
-#define PERSON_CONFIRM_SCANS             2U
-#define PERSON_CLEAR_SCANS               4U
-#define PERSON_LIDAR_TIMEOUT_MS          350U
-#define PERSON_WAIT_POLL_MS              20U
+#define PERSON_WARN_DISTANCE_MM             900U
+#define PERSON_NEW_POINT_DISTANCE_MM        700U
+#define PERSON_INTRUSION_DELTA_MM           120U
+#define PERSON_MIN_CLUSTER_POINTS           3U
+#define PERSON_CONFIRM_SCANS                2U
+#define PERSON_CLEAR_SCANS                  4U
+#define PERSON_LIDAR_TIMEOUT_MS             350U
+#define PERSON_WAIT_POLL_MS                 20U
+
+#define RIGHT_PERSON_ANGLE_MIN_DEG           55U
+#define RIGHT_PERSON_ANGLE_MAX_DEG          125U
+#define RIGHT_WALL_ANGLE_MIN_DEG             60U
+#define RIGHT_WALL_ANGLE_MAX_DEG            120U
+#define RIGHT_WALL_MIN_Y_MM                 350U
+#define RIGHT_WALL_MAX_Y_MM                2600U
+#define RIGHT_WALL_MIN_POINTS                 8U
+#define RIGHT_WALL_MAX_SCAN_STEP_MM         300U
+
+/* Tunable right-side safety rectangle in lidar coordinates. */
+#define RIGHT_PERSON_ROI_REAR_X_MM       (-280.0f)
+#define RIGHT_PERSON_ROI_FRONT_X_MM        420.0f
+#define RIGHT_PERSON_ROI_NEAR_Y_MM         120.0f
+#define RIGHT_PERSON_WALL_GAP_MM           150.0f
+#define RIGHT_PERSON_POINT_GAP_SQ        32400.0f  /* 180 mm */
+#define RIGHT_PERSON_MAX_SPAN_SQ        102400.0f  /* 320 mm */
+#define RIGHT_PERSON_MIN_CLUSTER_POINTS       4U
+#define RIGHT_PERSON_CONFIRM_SCANS             3U
 
 // 普通台阶左移人员侵入检测开关：现场栅栏误报时改为 0，右侧检测不受影响。
 #define ENABLE_STAIR_LEFT_PERSON_SAFETY  0
@@ -83,8 +105,11 @@ typedef enum {
 
 typedef struct {
     uint16_t reference_distance[360];
+    uint16_t scan_distance[360];
     uint32_t last_scan_sequence;
+    uint16_t right_wall_y_mm;
     uint8_t suspect_scans;
+    uint8_t last_intrusion_points;
     SideSafetyDirection_t direction;
 } SideSafetyMonitor_t;
 
@@ -372,23 +397,207 @@ static void SideSafety_CopyReference(SideSafetyMonitor_t *monitor)
     SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
 
     for (uint16_t angle = start_angle; angle <= end_angle; angle++) {
-        uint16_t distance = Lidar_Distance_Array[angle];
-        if (distance > 0U) {
-            monitor->reference_distance[angle] = distance;
-        }
+        monitor->reference_distance[angle] = monitor->scan_distance[angle];
     }
 }
 
 static void SideSafety_Init(SideSafetyMonitor_t *monitor,
                             SideSafetyDirection_t direction)
 {
+    uint32_t completed_sequence = 0U;
+
     memset(monitor, 0, sizeof(*monitor));
     monitor->direction = direction;
-    monitor->last_scan_sequence = Lidar_ScanSequence;
+    if (Lidar_CopyCompletedScan(monitor->scan_distance, &completed_sequence) != 0U) {
+        monitor->last_scan_sequence = completed_sequence;
+    } else {
+        monitor->last_scan_sequence = Lidar_ScanSequence;
+    }
     SideSafety_CopyReference(monitor);
 }
 
-static uint8_t SideSafety_MaxIntrusionRun(const SideSafetyMonitor_t *monitor)
+static void SideSafety_PolarToCartesian(uint16_t angle,
+                                        uint16_t distance,
+                                        float *x,
+                                        float *y)
+{
+    float radian = (float)angle * 3.14159265f / 180.0f;
+    *x = (float)distance * arm_cos_f32(radian);
+    *y = (float)distance * arm_sin_f32(radian);
+}
+
+static uint16_t SideSafety_EstimateRightWallY(const SideSafetyMonitor_t *monitor)
+{
+    uint16_t candidates[RIGHT_WALL_ANGLE_MAX_DEG - RIGHT_WALL_ANGLE_MIN_DEG + 1U];
+    uint16_t candidate_count = 0U;
+    uint16_t wall_y;
+
+    for (uint16_t angle = RIGHT_WALL_ANGLE_MIN_DEG;
+         angle <= RIGHT_WALL_ANGLE_MAX_DEG;
+         angle++) {
+        uint16_t distance = monitor->scan_distance[angle];
+        float x;
+        float y;
+
+        if (distance == 0U) {
+            continue;
+        }
+
+        SideSafety_PolarToCartesian(angle, distance, &x, &y);
+        (void)x;
+        if (y >= (float)RIGHT_WALL_MIN_Y_MM &&
+            y <= (float)RIGHT_WALL_MAX_Y_MM) {
+            uint16_t value = (uint16_t)(y + 0.5f);
+            uint16_t insert_at = candidate_count;
+
+            while (insert_at > 0U && candidates[insert_at - 1U] > value) {
+                candidates[insert_at] = candidates[insert_at - 1U];
+                insert_at--;
+            }
+            candidates[insert_at] = value;
+            candidate_count++;
+        }
+    }
+
+    if (candidate_count < RIGHT_WALL_MIN_POINTS) {
+        return monitor->right_wall_y_mm;
+    }
+
+    /* Upper quartile ignores a compact foreground hand/leg in front of wall. */
+    wall_y = candidates[((candidate_count - 1U) * 3U) / 4U];
+    if (monitor->right_wall_y_mm > 0U) {
+        uint16_t difference = (wall_y > monitor->right_wall_y_mm)
+                                ? (uint16_t)(wall_y - monitor->right_wall_y_mm)
+                                : (uint16_t)(monitor->right_wall_y_mm - wall_y);
+        if (difference > RIGHT_WALL_MAX_SCAN_STEP_MM) {
+            return monitor->right_wall_y_mm;
+        }
+    }
+
+    return wall_y;
+}
+
+static uint8_t SideSafety_RightClusterScore(uint8_t point_count,
+                                            float min_x,
+                                            float max_x,
+                                            float min_y,
+                                            float max_y)
+{
+    float span_x;
+    float span_y;
+
+    if (point_count < RIGHT_PERSON_MIN_CLUSTER_POINTS) {
+        return 0U;
+    }
+
+    span_x = max_x - min_x;
+    span_y = max_y - min_y;
+    if ((span_x * span_x + span_y * span_y) > RIGHT_PERSON_MAX_SPAN_SQ) {
+        return 0U;
+    }
+
+    return point_count;
+}
+
+static uint8_t SideSafety_RightMaxIntrusionCluster(SideSafetyMonitor_t *monitor)
+{
+    uint8_t current_points = 0U;
+    uint8_t max_points = 0U;
+    float min_x = 0.0f;
+    float max_x = 0.0f;
+    float min_y = 0.0f;
+    float max_y = 0.0f;
+    float previous_x = 0.0f;
+    float previous_y = 0.0f;
+
+    monitor->right_wall_y_mm = SideSafety_EstimateRightWallY(monitor);
+
+    for (uint16_t angle = RIGHT_PERSON_ANGLE_MIN_DEG;
+         angle <= RIGHT_PERSON_ANGLE_MAX_DEG;
+         angle++) {
+        uint16_t current = monitor->scan_distance[angle];
+        uint16_t reference = monitor->reference_distance[angle];
+        bool is_intrusion = false;
+        float x = 0.0f;
+        float y = 0.0f;
+
+        if (current > 0U) {
+            SideSafety_PolarToCartesian(angle, current, &x, &y);
+            if (x >= RIGHT_PERSON_ROI_REAR_X_MM &&
+                x <= RIGHT_PERSON_ROI_FRONT_X_MM &&
+                y >= RIGHT_PERSON_ROI_NEAR_Y_MM) {
+                if (monitor->right_wall_y_mm > 0U) {
+                    is_intrusion = (y + RIGHT_PERSON_WALL_GAP_MM <=
+                                    (float)monitor->right_wall_y_mm);
+                } else if (current <= PERSON_WARN_DISTANCE_MM) {
+                    is_intrusion = ((reference > current &&
+                                     (uint16_t)(reference - current) >=
+                                         PERSON_INTRUSION_DELTA_MM) ||
+                                    (reference == 0U &&
+                                     current <= PERSON_NEW_POINT_DISTANCE_MM));
+                }
+            }
+        }
+
+        if (is_intrusion) {
+            if (current_points > 0U) {
+                float gap_x = x - previous_x;
+                float gap_y = y - previous_y;
+                if ((gap_x * gap_x + gap_y * gap_y) > RIGHT_PERSON_POINT_GAP_SQ) {
+                    uint8_t score = SideSafety_RightClusterScore(current_points,
+                                                                  min_x,
+                                                                  max_x,
+                                                                  min_y,
+                                                                  max_y);
+                    if (score > max_points) {
+                        max_points = score;
+                    }
+                    current_points = 0U;
+                }
+            }
+
+            if (current_points == 0U) {
+                min_x = max_x = x;
+                min_y = max_y = y;
+            } else {
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
+            }
+
+            current_points++;
+            previous_x = x;
+            previous_y = y;
+        } else if (current_points > 0U) {
+            uint8_t score = SideSafety_RightClusterScore(current_points,
+                                                          min_x,
+                                                          max_x,
+                                                          min_y,
+                                                          max_y);
+            if (score > max_points) {
+                max_points = score;
+            }
+            current_points = 0U;
+        }
+    }
+
+    if (current_points > 0U) {
+        uint8_t score = SideSafety_RightClusterScore(current_points,
+                                                      min_x,
+                                                      max_x,
+                                                      min_y,
+                                                      max_y);
+        if (score > max_points) {
+            max_points = score;
+        }
+    }
+
+    monitor->last_intrusion_points = max_points;
+    return max_points;
+}
+
+static uint8_t SideSafety_BackgroundMaxIntrusionRun(const SideSafetyMonitor_t *monitor)
 {
     uint16_t start_angle;
     uint16_t end_angle;
@@ -397,7 +606,7 @@ static uint8_t SideSafety_MaxIntrusionRun(const SideSafetyMonitor_t *monitor)
     SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
 
     for (uint16_t angle = start_angle; angle <= end_angle; angle++) {
-        uint16_t current = Lidar_Distance_Array[angle];
+        uint16_t current = monitor->scan_distance[angle];
         uint16_t reference = monitor->reference_distance[angle];
         bool is_intrusion = false;
 
@@ -424,10 +633,39 @@ static uint8_t SideSafety_MaxIntrusionRun(const SideSafetyMonitor_t *monitor)
     return max_run;
 }
 
+static uint8_t SideSafety_MaxIntrusionRun(SideSafetyMonitor_t *monitor)
+{
+    if (monitor->direction == SIDE_SAFETY_RIGHT) {
+        return SideSafety_RightMaxIntrusionCluster(monitor);
+    }
+
+    monitor->last_intrusion_points = SideSafety_BackgroundMaxIntrusionRun(monitor);
+    return monitor->last_intrusion_points;
+}
+
+static uint8_t SideSafety_MinClusterPoints(const SideSafetyMonitor_t *monitor)
+{
+    return (monitor->direction == SIDE_SAFETY_RIGHT)
+             ? RIGHT_PERSON_MIN_CLUSTER_POINTS
+             : PERSON_MIN_CLUSTER_POINTS;
+}
+
+static uint8_t SideSafety_ConfirmScanCount(const SideSafetyMonitor_t *monitor)
+{
+    return (monitor->direction == SIDE_SAFETY_RIGHT)
+             ? RIGHT_PERSON_CONFIRM_SCANS
+             : PERSON_CONFIRM_SCANS;
+}
+
 static bool SideSafety_NewScanReady(SideSafetyMonitor_t *monitor)
 {
     uint32_t sequence = Lidar_ScanSequence;
     if (sequence == monitor->last_scan_sequence) {
+        return false;
+    }
+
+    if (Lidar_CopyCompletedScan(monitor->scan_distance, &sequence) == 0U ||
+        sequence == monitor->last_scan_sequence) {
         return false;
     }
 
@@ -446,8 +684,8 @@ static bool SideSafety_PersonConfirmed(SideSafetyMonitor_t *monitor)
         return false;
     }
 
-    if (SideSafety_MaxIntrusionRun(monitor) >= PERSON_MIN_CLUSTER_POINTS) {
-        if (monitor->suspect_scans < PERSON_CONFIRM_SCANS) {
+    if (SideSafety_MaxIntrusionRun(monitor) >= SideSafety_MinClusterPoints(monitor)) {
+        if (monitor->suspect_scans < SideSafety_ConfirmScanCount(monitor)) {
             monitor->suspect_scans++;
         }
     } else {
@@ -455,7 +693,7 @@ static bool SideSafety_PersonConfirmed(SideSafetyMonitor_t *monitor)
         SideSafety_CopyReference(monitor);
     }
 
-    return monitor->suspect_scans >= PERSON_CONFIRM_SCANS;
+    return monitor->suspect_scans >= SideSafety_ConfirmScanCount(monitor);
 }
 
 static void SideSafety_ResumeSweep(SideSafetyDirection_t direction,
@@ -477,7 +715,13 @@ static void SideSafety_WaitUntilClear(SideSafetyMonitor_t *monitor,
     Robot_Stop();
     osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
     STOP_SWEEPER();
-    printf("[PERSON] Side intrusion confirmed, stop and wait.\r\n");
+    if (monitor->direction == SIDE_SAFETY_RIGHT) {
+        printf("[PERSON] Right ROI intrusion confirmed (wall=%u mm, cluster=%u), stop and wait.\r\n",
+               monitor->right_wall_y_mm,
+               monitor->last_intrusion_points);
+    } else {
+        printf("[PERSON] Side intrusion confirmed, stop and wait.\r\n");
+    }
 
     while (clear_scans < PERSON_CLEAR_SCANS) {
         osDelay(PERSON_WAIT_POLL_MS);
@@ -491,7 +735,7 @@ static void SideSafety_WaitUntilClear(SideSafetyMonitor_t *monitor,
             continue;
         }
 
-        if (SideSafety_MaxIntrusionRun(monitor) < PERSON_MIN_CLUSTER_POINTS) {
+        if (SideSafety_MaxIntrusionRun(monitor) < SideSafety_MinClusterPoints(monitor)) {
             clear_scans++;
         } else {
             clear_scans = 0U;

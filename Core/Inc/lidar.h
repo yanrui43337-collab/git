@@ -19,6 +19,14 @@ extern volatile uint32_t Lidar_ScanSequence;
 extern volatile uint32_t Lidar_LastUpdateTick;
 
 /**
+ * @brief Copy the latest fully completed 360-degree scan.
+ * @param destination Caller-owned 360-element distance buffer.
+ * @param sequence Optional completed-scan sequence output.
+ * @return 1 when a complete scan is available, otherwise 0.
+ */
+uint8_t Lidar_CopyCompletedScan(uint16_t destination[360], uint32_t *sequence);
+
+/**
  * @brief 避障常用的方向最小距离变量
  */
 extern int left_min; 

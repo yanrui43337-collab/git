@@ -58,6 +58,16 @@ uint16_t Lidar_Distance_Array[360] = {0};
 volatile uint32_t Lidar_ScanSequence = 0;
 volatile uint32_t Lidar_LastUpdateTick = 0;
 
+/*
+ * The live distance array above is retained for the existing steering logic.
+ * Safety detection uses a completed-scan double buffer so that a point which
+ * disappears in the next revolution cannot survive as stale obstacle data.
+ */
+static uint16_t lidar_working_scan[360] = {0};
+static uint16_t lidar_completed_scan[2][360] = {{0}};
+static volatile uint8_t lidar_completed_index = 0U;
+static float lidar_previous_start_angle = -1.0f;
+
 int left_min =0;   //左侧最小距离
 int right_min = 0; //右侧最小距离
 int front_min =0;  //前方最小距离
@@ -84,6 +94,8 @@ HAL_StatusTypeDef Lidar_RestartDMA(void)
 
     Lidar_WriteIndex = 0U;
     Lidar_ReadIndex = 0U;
+    memset(lidar_working_scan, 0, sizeof(lidar_working_scan));
+    lidar_previous_start_angle = -1.0f;
     SCB_CleanInvalidateDCache_by_Addr((uint32_t *)Lidar_RxBuf, sizeof(Lidar_RxBuf));
 
     status = HAL_UARTEx_ReceiveToIdle_DMA(&huart2, Lidar_RxBuf, sizeof(Lidar_RxBuf));
@@ -125,7 +137,6 @@ void Lidar_Init(void)
 // --- 2. 核心解析函数：提取 360 度距离数据 ---
  void Lidar_ParseSingleFrame(uint8_t *frame)
 {
-    static float previous_start_angle = -1.0f;
     // 1. 校验 CRC (Byte_0 到 Byte_56 的累加和)
     uint8_t sum = 0;
     for(int i = 0; i < 57; i++) 
@@ -144,10 +155,21 @@ void Lidar_Init(void)
     float stop_angle = ((frame[55] << 8) | frame[56]) / 100.0f;
 
     Lidar_LastUpdateTick = HAL_GetTick();
-    if (previous_start_angle > 300.0f && start_angle < 60.0f) {
+    if (lidar_previous_start_angle > 300.0f && start_angle < 60.0f) {
+        uint8_t completed_index = (uint8_t)(lidar_completed_index ^ 1U);
+
+        memcpy(lidar_completed_scan[completed_index],
+               lidar_working_scan,
+               sizeof(lidar_working_scan));
+        memset(lidar_working_scan, 0, sizeof(lidar_working_scan));
+
+        /* Publish only after the complete buffer is ready. */
+        __DMB();
+        lidar_completed_index = completed_index;
+        __DMB();
         Lidar_ScanSequence++;
     }
-    previous_start_angle = start_angle;
+    lidar_previous_start_angle = start_angle;
 
     // 3. 计算这一帧的角度跨度 (必须处理跨越 0 度极点的情况)
     float diff_angle = stop_angle - start_angle;
@@ -179,6 +201,9 @@ void Lidar_Init(void)
         uint8_t dist_H = frame[7 + i * 3];
         uint8_t dist_L = frame[8 + i * 3];
         uint16_t distance = (dist_H << 8) | dist_L;
+
+        /* Every completed revolution starts from zero, including invalid bins. */
+        lidar_working_scan[index] = distance;
         
         // 7. 更新极坐标数组 (过滤掉距离为 0 的无效噪点)
         if (distance > 0) {
@@ -204,6 +229,38 @@ void Lidar_Init(void)
             scan_points[index].cluster_id = -1; // 标记为无效点
         }
     }
+}
+
+uint8_t Lidar_CopyCompletedScan(uint16_t destination[360], uint32_t *sequence)
+{
+    uint32_t sequence_before;
+    uint32_t sequence_after;
+    uint8_t completed_index;
+
+    if (destination == NULL) {
+        return 0U;
+    }
+
+    do {
+        sequence_before = Lidar_ScanSequence;
+        if (sequence_before == 0U) {
+            return 0U;
+        }
+
+        completed_index = lidar_completed_index;
+        __DMB();
+        memcpy(destination,
+               lidar_completed_scan[completed_index],
+               sizeof(lidar_completed_scan[completed_index]));
+        __DMB();
+        sequence_after = Lidar_ScanSequence;
+    } while (sequence_before != sequence_after);
+
+    if (sequence != NULL) {
+        *sequence = sequence_after;
+    }
+
+    return 1U;
 }
 
 
