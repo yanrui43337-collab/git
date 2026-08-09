@@ -67,6 +67,7 @@
  * vehicle's local stair ROI.  This prevents rear stair/wall points and stale
  * angular bins from keeping the robot stopped after a person leaves.
  */
+ 
 #define PERSON_WARN_DISTANCE_MM             900U
 #define PERSON_NEW_POINT_DISTANCE_MM        700U
 #define PERSON_INTRUSION_DELTA_MM           120U
@@ -76,22 +77,22 @@
 #define PERSON_LIDAR_TIMEOUT_MS             350U
 #define PERSON_WAIT_POLL_MS                 20U
 
-#define RIGHT_PERSON_ANGLE_MIN_DEG           55U
+#define RIGHT_PERSON_ANGLE_MIN_DEG          55U
 #define RIGHT_PERSON_ANGLE_MAX_DEG          125U
-#define RIGHT_WALL_ANGLE_MIN_DEG             60U
+#define RIGHT_WALL_ANGLE_MIN_DEG            60U
 #define RIGHT_WALL_ANGLE_MAX_DEG            120U
 #define RIGHT_WALL_MIN_Y_MM                 350U
-#define RIGHT_WALL_MAX_Y_MM                2600U
-#define RIGHT_WALL_MIN_POINTS                 8U
+#define RIGHT_WALL_MAX_Y_MM                 2600U
+#define RIGHT_WALL_MIN_POINTS               8U
 #define RIGHT_WALL_MAX_SCAN_STEP_MM         300U
 
 /* Tunable right-side safety rectangle in lidar coordinates. */
-#define RIGHT_PERSON_ROI_REAR_X_MM       (-280.0f)
+#define RIGHT_PERSON_ROI_REAR_X_MM         (-280.0f)
 #define RIGHT_PERSON_ROI_FRONT_X_MM        420.0f
 #define RIGHT_PERSON_ROI_NEAR_Y_MM         120.0f
 #define RIGHT_PERSON_WALL_GAP_MM           150.0f
 #define RIGHT_PERSON_POINT_GAP_SQ        32400.0f  /* 180 mm */
-#define RIGHT_PERSON_MAX_SPAN_SQ        102400.0f  /* 320 mm */
+#define RIGHT_PERSON_MAX_SPAN_SQ         102400.0f /* 320 mm */
 #define RIGHT_PERSON_MIN_CLUSTER_POINTS       4U
 #define RIGHT_PERSON_CONFIRM_SCANS             3U
 
@@ -306,6 +307,8 @@ static ChassisMsg_t msg_stop  = {0, 0, 0};
 static ChassisMsg_t msg_fwd   = {50, 0, 0};   
 static ChassisMsg_t msg_left  = {5, -90, 0};  
 static ChassisMsg_t msg_right = {5, 90, 0};   
+static ChassisMsg_t msg_stair_left  = {10, -90, 0};
+static ChassisMsg_t msg_stair_right = {10, 90, 0};
 static int stepper_cmd = 0;
 
 extern TIM_HandleTypeDef htim15;
@@ -334,6 +337,58 @@ static ChassisMsg_t Build_Yaw_Locked_Command(const ChassisMsg_t *base_command,
     corrected_command.x = base_command->x;
     corrected_command.y = base_command->y;
     corrected_command.w = -compensation_w;
+
+    if (yaw_error_out != NULL) {
+        *yaw_error_out = yaw_error;
+    }
+
+    return corrected_command;
+}
+
+/*
+ * Ordinary-stair lateral motion uses IMU_Get_Yaw() directly because that API
+ * already returns degrees.  Platform sweeping intentionally keeps using the
+ * legacy helper above so its proven heading behaviour is unchanged.
+ */
+static ChassisMsg_t Build_Stair_Yaw_Locked_Command(const ChassisMsg_t *base_command,
+                                                    float locked_yaw,
+                                                    float kp,
+                                                    int *previous_w,
+                                                    float *yaw_error_out)
+{
+    const float yaw_deadband_deg = 0.5f;
+    const int correction_limit = 15;
+    const int correction_slew_step = 4;
+    float current_yaw = IMU_Get_Yaw();
+    float yaw_error = locked_yaw - current_yaw;
+    int compensation_w;
+    int target_w;
+    ChassisMsg_t corrected_command;
+
+    if (yaw_error > 180.0f) yaw_error -= 360.0f;
+    if (yaw_error < -180.0f) yaw_error += 360.0f;
+
+    if (yaw_error > -yaw_deadband_deg && yaw_error < yaw_deadband_deg) {
+        yaw_error = 0.0f;
+    }
+
+    compensation_w = (int)(kp * yaw_error);
+    if (compensation_w > correction_limit) compensation_w = correction_limit;
+    if (compensation_w < -correction_limit) compensation_w = -correction_limit;
+    target_w = -compensation_w;
+
+    if (previous_w != NULL) {
+        if (target_w > *previous_w + correction_slew_step) {
+            target_w = *previous_w + correction_slew_step;
+        } else if (target_w < *previous_w - correction_slew_step) {
+            target_w = *previous_w - correction_slew_step;
+        }
+        *previous_w = target_w;
+    }
+
+    corrected_command.x = base_command->x;
+    corrected_command.y = base_command->y;
+    corrected_command.w = target_w;
 
     if (yaw_error_out != NULL) {
         *yaw_error_out = yaw_error;
@@ -1374,8 +1429,9 @@ void AutoClimb_Process(void)
       osDelay(500); 
 
       // 普通台阶左右清扫共用同一个基准航向，停车或换向后不重新锁定。
-      float stair_locked_yaw = IMU_Get_Yaw() * 57.29578f;
-      float stair_lateral_kp = 0.5f;
+      float stair_locked_yaw = IMU_Get_Yaw();
+      float stair_lateral_kp = 2.0f;
+      int stair_yaw_last_w = 0;
       printf("🎯 [普通台阶航向锁定] 左右移动基准角度: %.2f°\r\n", stair_locked_yaw);
        
       // ==========================================================
@@ -1387,10 +1443,11 @@ void AutoClimb_Process(void)
       
       while (left_min > LIDAR_LEFT_STOP_DIST || left_min <= 0) { 
           float yaw_error = 0.0f;
-          ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_left,
-                                                           stair_locked_yaw,
-                                                           stair_lateral_kp,
-                                                           &yaw_error);
+          ChassisMsg_t move_cmd = Build_Stair_Yaw_Locked_Command(&msg_stair_left,
+                                                                 stair_locked_yaw,
+                                                                 stair_lateral_kp,
+                                                                 &stair_yaw_last_w,
+                                                                 &yaw_error);
           osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
 #if ENABLE_STAIR_LEFT_PERSON_SAFETY
           SideSafety_Process(&side_safety_monitor, &move_cmd);
@@ -1404,6 +1461,7 @@ void AutoClimb_Process(void)
       osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
       osDelay(500); 
       STOP_SWEEPER(); 
+      stair_yaw_last_w = 0;
 
       // ==========================================================
       printf("▶ 动作 7: 麦轮开始右移...\r\n");
@@ -1412,10 +1470,11 @@ void AutoClimb_Process(void)
       
       while (right_min > LIDAR_RIGHT_STOP_DIST || right_min <= 0) { 
           float yaw_error = 0.0f;
-          ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_right,
-                                                           stair_locked_yaw,
-                                                           stair_lateral_kp,
-                                                           &yaw_error);
+          ChassisMsg_t move_cmd = Build_Stair_Yaw_Locked_Command(&msg_stair_right,
+                                                                 stair_locked_yaw,
+                                                                 stair_lateral_kp,
+                                                                 &stair_yaw_last_w,
+                                                                 &yaw_error);
           osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
           SideSafety_Process(&side_safety_monitor, &move_cmd);
           printf("🎯 [雷达监控-右侧] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
