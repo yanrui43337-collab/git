@@ -16,17 +16,30 @@
 /* ========================================================== */
 /* ==================== 1. 宏定义区域 ======================= */
 /* ========================================================== */
-#define AUTO_TARGET_UP       2120000   // 步进电机上升目标脉冲数（台阶高度）
+#define AUTO_TARGET_UP       2180000   // 步进电机上升目标脉冲数（台阶高度）
 #define AUTO_TARGET_DOWN     -80000    // 步进电机下降目标脉冲数（底盘着地）
+#define FIRST_STAIR_START_POS -70000   // 第一阶专用起始位置，减少机构阻碍
 #define ULTRA_STOP_DIST      50        // 超声波停止直行距离（贴紧台阶）
 #define ULTRA_STEP_FWD_DIST  125       // 超声波安全爬坡前进距离 
 
 #define LIDAR_LEFT_STOP_DIST       440    // 避障/对齐：雷达左侧安全停止距离
 #define LIDAR_RIGHT_STOP_DIST      480    // 避障/对齐：雷达右侧安全停止距离
-#define LIDAR_RIGHT_WALL_MIN_DIST  440    // S型扫平：右侧贴墙最小距离（换轨标志）
-#define LIDAR_RIGHT_PLATFORM_LIMIT 1150   // S型扫平：右侧平台边缘极限距离（防跌落）
+#define LIDAR_LEFT_WALL_MIN_DIST   440    // S型扫平：左侧贴墙最小距离（换轨标志）
+#define LIDAR_LEFT_PLATFORM_LIMIT  1150   // S型扫平：左侧平台边缘极限距离（防跌落）
 #define ROBOT_FWD_STEP_DIST        190    // S型扫平：每次换轨前行的精准物理距离 (已按你要求改大至 200)
 #define PLATFORM_FRONT_END_DIST    580    // S型扫平终极目标，离前方墙壁 40mm 结束清扫
+
+// 平台清扫结束后的第二次顺时针转角：理论值 90°，当前保留原来的 75°人工修正。
+// 最终车头转得不够就增大，转过头就减小；阶段 4 的第一次转向固定为 90°。
+#define PLATFORM_FINAL_CW_TURN_DEG 75.0f
+
+// 普通台阶横移参数：保持向前顶住上一阶，并降低航向纠偏引起的摆动。
+#define STAIR_LATERAL_FORWARD_SPEED  20
+#define STAIR_LATERAL_SIDE_SPEED     90
+#define STAIR_LATERAL_YAW_KP         1.0f
+#define STAIR_YAW_DEADBAND_DEG       1.0f
+#define STAIR_YAW_CORRECTION_LIMIT   8
+#define STAIR_YAW_SLEW_STEP          2
 
 #define ULTRA_PLATFORM_DETECT  1600       // 核心标志：超声波突变阈值（大于此值判定前方是空旷平台）
 
@@ -35,6 +48,9 @@
 
 #define CRAWLER_FWD_SPEED      6000       // 爬坡履带前进基准速度
 #define CRAWLER_REV_SPEED      -6000      // 爬坡履带后退基准速度
+
+// 第一阶起步阻力较大，仅首次寻找台阶时小幅提高麦轮前进速度。
+#define FIRST_STAIR_FWD_SPEED  65
 
 
 // ==========================================================
@@ -61,11 +77,10 @@
 /*
  * Side-sweep person safety gate.
  *
- * The optional left-side path retains the original scan-background method.
- * The active right-side path uses a complete lidar revolution, estimates the
- * right wall, and only evaluates compact foreground clusters inside the
- * vehicle's local stair ROI.  This prevents rear stair/wall points and stale
- * angular bins from keeping the robot stopped after a person leaves.
+ * The person detector works in side-relative coordinates.  Right-side lidar
+ * points use their original positive Y coordinate; left-side points mirror Y
+ * to positive before wall estimation, clustering and danger-zone checks.
+ * This lets both wall directions share the tuned foreground/track algorithm.
  */
  
 #define PERSON_WARN_DISTANCE_MM             900U
@@ -76,28 +91,51 @@
 #define PERSON_CLEAR_SCANS                  4U
 #define PERSON_LIDAR_TIMEOUT_MS             350U
 #define PERSON_WAIT_POLL_MS                 20U
-
-#define RIGHT_PERSON_ANGLE_MIN_DEG          55U
-#define RIGHT_PERSON_ANGLE_MAX_DEG          125U
-#define RIGHT_WALL_ANGLE_MIN_DEG            60U
-#define RIGHT_WALL_ANGLE_MAX_DEG            120U
+#define RIGHT_OBSERVE_ANGLE_MIN_DEG         40U
+#define RIGHT_OBSERVE_ANGLE_MAX_DEG         140U
+#define RIGHT_WALL_ANGLE_MIN_DEG            45U
+#define RIGHT_WALL_ANGLE_MAX_DEG            135U
+#define LEFT_OBSERVE_ANGLE_MIN_DEG          220U
+#define LEFT_OBSERVE_ANGLE_MAX_DEG          320U
+#define LEFT_WALL_ANGLE_MIN_DEG             225U
+#define LEFT_WALL_ANGLE_MAX_DEG             315U
 #define RIGHT_WALL_MIN_Y_MM                 350U
 #define RIGHT_WALL_MAX_Y_MM                 2600U
-#define RIGHT_WALL_MIN_POINTS               8U
+#define RIGHT_WALL_MIN_POINTS               10U
 #define RIGHT_WALL_MAX_SCAN_STEP_MM         300U
 
-/* Tunable right-side safety rectangle in lidar coordinates. */
-#define RIGHT_PERSON_ROI_REAR_X_MM         (-280.0f)
-#define RIGHT_PERSON_ROI_FRONT_X_MM        420.0f
-#define RIGHT_PERSON_ROI_NEAR_Y_MM         120.0f
-#define RIGHT_PERSON_WALL_GAP_MM           150.0f
-#define RIGHT_PERSON_POINT_GAP_SQ        32400.0f  /* 180 mm */
-#define RIGHT_PERSON_MAX_SPAN_SQ         102400.0f /* 320 mm */
-#define RIGHT_PERSON_MIN_CLUSTER_POINTS       4U
-#define RIGHT_PERSON_CONFIRM_SCANS             3U
+/* Wide observation area: classify and track only; it never stops the robot. */
+#define RIGHT_OBSERVE_REAR_X_MM           (-600.0f)
+#define RIGHT_OBSERVE_FRONT_X_MM            700.0f
+#define RIGHT_OBSERVE_NEAR_Y_MM             100.0f
+#define RIGHT_FOREGROUND_WALL_GAP_MM        100.0f
+#define RIGHT_OBSERVE_POINT_GAP_SQ        19600.0f  /* 140 mm */
 
-// 普通台阶左移人员侵入检测开关：现场栅栏误报时改为 0，右侧检测不受影响。
-#define ENABLE_STAIR_LEFT_PERSON_SAFETY  0
+/* Inner danger area: a tracked leg/unknown object here requests a stop. */
+#define RIGHT_DANGER_REAR_X_MM            (-280.0f)
+#define RIGHT_DANGER_FRONT_X_MM             420.0f
+#define RIGHT_DANGER_NEAR_Y_MM              120.0f
+#define RIGHT_DANGER_MAX_Y_MM               900.0f
+#define RIGHT_DANGER_WALL_MARGIN_MM         100.0f
+
+#define RIGHT_STRUCTURE_MIN_SPAN_SQ      490000.0f  /* 700 mm */
+#define RIGHT_PERSON_MAX_SPAN_SQ         422500.0f  /* 650 mm, includes waist */
+#define RIGHT_UNKNOWN_MAX_SPAN_SQ        810000.0f  /* 900 mm */
+#define RIGHT_PERSON_MIN_CLUSTER_POINTS        4U
+#define RIGHT_UNKNOWN_MIN_CLUSTER_POINTS       3U
+#define RIGHT_PERSON_CONFIRM_SCANS             3U
+#define RIGHT_PERSON_MIN_DANGER_POINTS         4U
+#define RIGHT_UNKNOWN_MIN_DANGER_POINTS        6U
+#define RIGHT_UNKNOWN_DANGER_PERCENT          30U
+#define RIGHT_BACKGROUND_MAX_DISTANCE_MM    1050U
+#define RIGHT_PERSON_MIN_NEW_DANGER_POINTS     3U
+#define RIGHT_UNKNOWN_MIN_NEW_DANGER_POINTS    4U
+#define RIGHT_UNKNOWN_NEW_PERCENT             20U
+#define RIGHT_TRACK_MATCH_DISTANCE_SQ       90000.0f /* 300 mm */
+#define RIGHT_TRACK_MAX_MISSED_SCANS            2U
+
+// 普通台阶左移靠墙时启用人员侵入演示。
+#define ENABLE_STAIR_LEFT_PERSON_SAFETY  1
 
 typedef enum {
     SIDE_SAFETY_LEFT = 0,
@@ -111,10 +149,54 @@ typedef struct {
     uint16_t right_wall_y_mm;
     uint8_t suspect_scans;
     uint8_t last_intrusion_points;
+    uint8_t right_track_confidence;
+    uint8_t right_track_missed_scans;
+    uint8_t right_track_in_danger;
+    uint8_t right_observed_candidate;
+    uint8_t right_last_class;
+    uint8_t right_last_danger_points;
+    uint8_t right_last_new_danger_points;
+    float right_track_x;
+    float right_track_y;
     SideSafetyDirection_t direction;
 } SideSafetyMonitor_t;
 
 static SideSafetyMonitor_t side_safety_monitor;
+
+typedef enum {
+    RIGHT_OBJECT_NONE = 0,
+    RIGHT_OBJECT_PERSON,
+    RIGHT_OBJECT_UNKNOWN,
+    RIGHT_OBJECT_STRUCTURE
+} RightObjectClass_t;
+
+typedef struct {
+    uint8_t point_count;
+    uint8_t danger_point_count;
+    uint8_t new_danger_point_count;
+    bool enters_danger;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+    float sum_x;
+    float sum_y;
+    float sum_xx;
+    float sum_yy;
+    float sum_xy;
+} RightClusterMetrics_t;
+
+typedef struct {
+    bool valid;
+    bool enters_danger;
+    RightObjectClass_t classification;
+    uint8_t point_count;
+    uint8_t danger_point_count;
+    uint8_t new_danger_point_count;
+    float center_x;
+    float center_y;
+    float selection_score;
+} RightCandidate_t;
 
 typedef struct {
     float x;
@@ -302,14 +384,21 @@ extern uint16_t Lidar_Get_Min_Distance_In_Range(uint16_t start_angle, uint16_t e
 extern volatile int32_t step_motor_pos;
 extern osThreadId_t AutoClimbTaskHandle;
 extern void Motor_Contro2(int m1_speed, int m2_speed, int m3_speed, int m4_speed);
+extern void Safe_Stepper_Stop(void);
 
 static ChassisMsg_t msg_stop  = {0, 0, 0};
 static ChassisMsg_t msg_fwd   = {50, 0, 0};   
+static ChassisMsg_t msg_first_stair_fwd = {FIRST_STAIR_FWD_SPEED, 0, 0};
 static ChassisMsg_t msg_left  = {5, -90, 0};  
 static ChassisMsg_t msg_right = {5, 90, 0};   
-static ChassisMsg_t msg_stair_left  = {10, -90, 0};
-static ChassisMsg_t msg_stair_right = {10, 90, 0};
+static ChassisMsg_t msg_stair_left  = {
+    STAIR_LATERAL_FORWARD_SPEED, -STAIR_LATERAL_SIDE_SPEED, 0
+};
+static ChassisMsg_t msg_stair_right = {
+    STAIR_LATERAL_FORWARD_SPEED, STAIR_LATERAL_SIDE_SPEED, 0
+};
 static int stepper_cmd = 0;
+static uint8_t completed_regular_stairs = 0U;
 
 extern TIM_HandleTypeDef htim15;
 extern TIM_HandleTypeDef htim16;
@@ -356,9 +445,9 @@ static ChassisMsg_t Build_Stair_Yaw_Locked_Command(const ChassisMsg_t *base_comm
                                                     int *previous_w,
                                                     float *yaw_error_out)
 {
-    const float yaw_deadband_deg = 0.5f;
-    const int correction_limit = 15;
-    const int correction_slew_step = 4;
+    const float yaw_deadband_deg = STAIR_YAW_DEADBAND_DEG;
+    const int correction_limit = STAIR_YAW_CORRECTION_LIMIT;
+    const int correction_slew_step = STAIR_YAW_SLEW_STEP;
     float current_yaw = IMU_Get_Yaw();
     float yaw_error = locked_yaw - current_yaw;
     int compensation_w;
@@ -437,11 +526,11 @@ static void SideSafety_GetAngleRange(SideSafetyDirection_t direction,
                                      uint16_t *end_angle)
 {
     if (direction == SIDE_SAFETY_RIGHT) {
-        *start_angle = 55U;
-        *end_angle = 125U;
+        *start_angle = RIGHT_OBSERVE_ANGLE_MIN_DEG;
+        *end_angle = RIGHT_OBSERVE_ANGLE_MAX_DEG;
     } else {
-        *start_angle = 235U;
-        *end_angle = 305U;
+        *start_angle = LEFT_OBSERVE_ANGLE_MIN_DEG;
+        *end_angle = LEFT_OBSERVE_ANGLE_MAX_DEG;
     }
 }
 
@@ -481,14 +570,27 @@ static void SideSafety_PolarToCartesian(uint16_t angle,
     *y = (float)distance * arm_sin_f32(radian);
 }
 
+static float SideSafety_NormalizeLateralY(const SideSafetyMonitor_t *monitor,
+                                          float y)
+{
+    return (monitor->direction == SIDE_SAFETY_LEFT) ? -y : y;
+}
+
 static uint16_t SideSafety_EstimateRightWallY(const SideSafetyMonitor_t *monitor)
 {
     uint16_t candidates[RIGHT_WALL_ANGLE_MAX_DEG - RIGHT_WALL_ANGLE_MIN_DEG + 1U];
     uint16_t candidate_count = 0U;
     uint16_t wall_y;
+    uint16_t start_angle = RIGHT_WALL_ANGLE_MIN_DEG;
+    uint16_t end_angle = RIGHT_WALL_ANGLE_MAX_DEG;
 
-    for (uint16_t angle = RIGHT_WALL_ANGLE_MIN_DEG;
-         angle <= RIGHT_WALL_ANGLE_MAX_DEG;
+    if (monitor->direction == SIDE_SAFETY_LEFT) {
+        start_angle = LEFT_WALL_ANGLE_MIN_DEG;
+        end_angle = LEFT_WALL_ANGLE_MAX_DEG;
+    }
+
+    for (uint16_t angle = start_angle;
+         angle <= end_angle;
          angle++) {
         uint16_t distance = monitor->scan_distance[angle];
         float x;
@@ -500,6 +602,7 @@ static uint16_t SideSafety_EstimateRightWallY(const SideSafetyMonitor_t *monitor
 
         SideSafety_PolarToCartesian(angle, distance, &x, &y);
         (void)x;
+        y = SideSafety_NormalizeLateralY(monitor, y);
         if (y >= (float)RIGHT_WALL_MIN_Y_MM &&
             y <= (float)RIGHT_WALL_MAX_Y_MM) {
             uint16_t value = (uint16_t)(y + 0.5f);
@@ -518,8 +621,27 @@ static uint16_t SideSafety_EstimateRightWallY(const SideSafetyMonitor_t *monitor
         return monitor->right_wall_y_mm;
     }
 
-    /* Upper quartile ignores a compact foreground hand/leg in front of wall. */
+    /* Upper quartile ignores a foreground person, including a wide waist. */
     wall_y = candidates[((candidate_count - 1U) * 3U) / 4U];
+    {
+        uint32_t wall_sum = 0U;
+        uint16_t wall_count = 0U;
+
+        for (uint16_t i = 0U; i < candidate_count; i++) {
+            uint16_t difference = (candidates[i] > wall_y)
+                                    ? (uint16_t)(candidates[i] - wall_y)
+                                    : (uint16_t)(wall_y - candidates[i]);
+            if (difference <= 100U) {
+                wall_sum += candidates[i];
+                wall_count++;
+            }
+        }
+
+        if (wall_count >= RIGHT_WALL_MIN_POINTS) {
+            wall_y = (uint16_t)(wall_sum / wall_count);
+        }
+    }
+
     if (monitor->right_wall_y_mm > 0U) {
         uint16_t difference = (wall_y > monitor->right_wall_y_mm)
                                 ? (uint16_t)(wall_y - monitor->right_wall_y_mm)
@@ -532,184 +654,399 @@ static uint16_t SideSafety_EstimateRightWallY(const SideSafetyMonitor_t *monitor
     return wall_y;
 }
 
-static uint8_t SideSafety_RightClusterScore(uint8_t point_count,
-                                            float min_x,
-                                            float max_x,
-                                            float min_y,
-                                            float max_y)
+static bool SideSafety_RightPointInDanger(const SideSafetyMonitor_t *monitor,
+                                          float x,
+                                          float y)
+{
+    float danger_max_y = RIGHT_DANGER_MAX_Y_MM;
+
+    if (monitor->right_wall_y_mm > (uint16_t)RIGHT_DANGER_WALL_MARGIN_MM) {
+        float wall_limited_y = (float)monitor->right_wall_y_mm -
+                               RIGHT_DANGER_WALL_MARGIN_MM;
+        if (wall_limited_y < danger_max_y) {
+            danger_max_y = wall_limited_y;
+        }
+    }
+
+    return x >= RIGHT_DANGER_REAR_X_MM &&
+           x <= RIGHT_DANGER_FRONT_X_MM &&
+           y >= RIGHT_DANGER_NEAR_Y_MM &&
+           y <= danger_max_y;
+}
+
+/*
+ * Keep the useful part of the earlier detector: a stop candidate must be new
+ * relative to the most recently learned clear scene.  Wall-relative geometry
+ * is still used to build and classify the full cluster, while this per-angle
+ * delta prevents a fixed stair/wall return from being re-armed after a person
+ * has left.
+ */
+static bool SideSafety_RightPointIsNew(uint16_t current,
+                                       uint16_t reference)
+{
+    if (current == 0U || current > RIGHT_BACKGROUND_MAX_DISTANCE_MM) {
+        return false;
+    }
+
+    if (reference > current &&
+        (uint16_t)(reference - current) >= PERSON_INTRUSION_DELTA_MM) {
+        return true;
+    }
+
+    return reference == 0U && current <= PERSON_NEW_POINT_DISTANCE_MM;
+}
+
+static void SideSafety_RightClusterReset(RightClusterMetrics_t *cluster)
+{
+    memset(cluster, 0, sizeof(*cluster));
+}
+
+static void SideSafety_RightClusterAdd(RightClusterMetrics_t *cluster,
+                                       float x,
+                                       float y,
+                                       bool enters_danger,
+                                       bool is_new)
+{
+    if (cluster->point_count == 0U) {
+        cluster->min_x = cluster->max_x = x;
+        cluster->min_y = cluster->max_y = y;
+    } else {
+        if (x < cluster->min_x) cluster->min_x = x;
+        if (x > cluster->max_x) cluster->max_x = x;
+        if (y < cluster->min_y) cluster->min_y = y;
+        if (y > cluster->max_y) cluster->max_y = y;
+    }
+
+    cluster->point_count++;
+    cluster->sum_x += x;
+    cluster->sum_y += y;
+    cluster->sum_xx += x * x;
+    cluster->sum_yy += y * y;
+    cluster->sum_xy += x * y;
+    if (enters_danger) {
+        cluster->enters_danger = true;
+        if (cluster->danger_point_count < 255U) {
+            cluster->danger_point_count++;
+        }
+        if (is_new && cluster->new_danger_point_count < 255U) {
+            cluster->new_danger_point_count++;
+        }
+    }
+}
+
+static RightObjectClass_t SideSafety_RightClassifyCluster(
+    const RightClusterMetrics_t *cluster)
 {
     float span_x;
     float span_y;
+    float span_sq;
+    float mean_x;
+    float mean_y;
+    float covariance_xx;
+    float covariance_yy;
+    float covariance_xy;
+    float covariance_trace;
+    float covariance_determinant;
+    bool is_long_line = false;
 
-    if (point_count < RIGHT_PERSON_MIN_CLUSTER_POINTS) {
-        return 0U;
+    if (cluster->point_count < RIGHT_UNKNOWN_MIN_CLUSTER_POINTS) {
+        return RIGHT_OBJECT_NONE;
     }
 
-    span_x = max_x - min_x;
-    span_y = max_y - min_y;
-    if ((span_x * span_x + span_y * span_y) > RIGHT_PERSON_MAX_SPAN_SQ) {
-        return 0U;
+    span_x = cluster->max_x - cluster->min_x;
+    span_y = cluster->max_y - cluster->min_y;
+    span_sq = span_x * span_x + span_y * span_y;
+
+    mean_x = cluster->sum_x / (float)cluster->point_count;
+    mean_y = cluster->sum_y / (float)cluster->point_count;
+    covariance_xx = cluster->sum_xx / (float)cluster->point_count - mean_x * mean_x;
+    covariance_yy = cluster->sum_yy / (float)cluster->point_count - mean_y * mean_y;
+    covariance_xy = cluster->sum_xy / (float)cluster->point_count - mean_x * mean_y;
+    covariance_trace = covariance_xx + covariance_yy;
+    covariance_determinant = covariance_xx * covariance_yy -
+                             covariance_xy * covariance_xy;
+    if (covariance_determinant < 0.0f) {
+        covariance_determinant = 0.0f;
     }
 
-    return point_count;
+    if (span_sq >= RIGHT_STRUCTURE_MIN_SPAN_SQ && covariance_trace > 1.0f) {
+        is_long_line = (covariance_determinant * 20.0f <
+                        covariance_trace * covariance_trace);
+    }
+
+    if (is_long_line) {
+        return RIGHT_OBJECT_STRUCTURE;
+    }
+
+    if (cluster->point_count >= RIGHT_PERSON_MIN_CLUSTER_POINTS &&
+        span_sq <= RIGHT_PERSON_MAX_SPAN_SQ) {
+        return RIGHT_OBJECT_PERSON;
+    }
+
+    if (span_sq <= RIGHT_UNKNOWN_MAX_SPAN_SQ || cluster->enters_danger) {
+        return RIGHT_OBJECT_UNKNOWN;
+    }
+
+    return RIGHT_OBJECT_STRUCTURE;
+}
+
+static void SideSafety_RightConsiderCluster(SideSafetyMonitor_t *monitor,
+                                            const RightClusterMetrics_t *cluster,
+                                            RightCandidate_t *best_candidate)
+{
+    RightObjectClass_t classification = SideSafety_RightClassifyCluster(cluster);
+    float center_x;
+    float center_y;
+    float selection_score;
+    uint8_t required_danger_points;
+    uint8_t required_new_danger_points;
+    bool center_in_danger;
+    bool triggers_wait;
+
+    if (classification == RIGHT_OBJECT_STRUCTURE) {
+        if (monitor->right_track_confidence == 0U) {
+            monitor->right_last_class = (uint8_t)RIGHT_OBJECT_STRUCTURE;
+        }
+        return;
+    }
+
+    if (classification != RIGHT_OBJECT_PERSON &&
+        classification != RIGHT_OBJECT_UNKNOWN) {
+        return;
+    }
+
+    center_x = cluster->sum_x / (float)cluster->point_count;
+    center_y = cluster->sum_y / (float)cluster->point_count;
+    center_in_danger = SideSafety_RightPointInDanger(monitor,
+                                                      center_x,
+                                                      center_y);
+
+    if (classification == RIGHT_OBJECT_PERSON) {
+        required_danger_points = RIGHT_PERSON_MIN_DANGER_POINTS;
+        required_new_danger_points = RIGHT_PERSON_MIN_NEW_DANGER_POINTS;
+    } else {
+        uint16_t percentage_points =
+            ((uint16_t)cluster->point_count * RIGHT_UNKNOWN_DANGER_PERCENT + 99U) /
+            100U;
+        uint16_t new_percentage_points =
+            ((uint16_t)cluster->point_count * RIGHT_UNKNOWN_NEW_PERCENT + 99U) /
+            100U;
+        required_danger_points = (percentage_points > RIGHT_UNKNOWN_MIN_DANGER_POINTS)
+                                   ? (uint8_t)percentage_points
+                                   : RIGHT_UNKNOWN_MIN_DANGER_POINTS;
+        required_new_danger_points =
+            (new_percentage_points > RIGHT_UNKNOWN_MIN_NEW_DANGER_POINTS)
+              ? (uint8_t)new_percentage_points
+              : RIGHT_UNKNOWN_MIN_NEW_DANGER_POINTS;
+    }
+
+    triggers_wait = center_in_danger &&
+                    cluster->danger_point_count >= required_danger_points &&
+                    cluster->new_danger_point_count >=
+                        required_new_danger_points;
+    selection_score = (classification == RIGHT_OBJECT_PERSON) ? 300.0f : 100.0f;
+    selection_score += (float)cluster->point_count;
+
+    if (triggers_wait) {
+        selection_score += 1000.0f;
+    }
+
+    if (monitor->right_track_confidence > 0U) {
+        float track_dx = center_x - monitor->right_track_x;
+        float track_dy = center_y - monitor->right_track_y;
+        if ((track_dx * track_dx + track_dy * track_dy) <=
+            RIGHT_TRACK_MATCH_DISTANCE_SQ) {
+            selection_score += 200.0f;
+        }
+    }
+
+    if (!best_candidate->valid ||
+        selection_score > best_candidate->selection_score) {
+        best_candidate->valid = true;
+        best_candidate->enters_danger = triggers_wait;
+        best_candidate->classification = classification;
+        best_candidate->point_count = cluster->point_count;
+        best_candidate->danger_point_count = cluster->danger_point_count;
+        best_candidate->new_danger_point_count =
+            cluster->new_danger_point_count;
+        best_candidate->center_x = center_x;
+        best_candidate->center_y = center_y;
+        best_candidate->selection_score = selection_score;
+    }
+}
+
+static uint8_t SideSafety_RightUpdateTrack(SideSafetyMonitor_t *monitor,
+                                           const RightCandidate_t *candidate)
+{
+    if (candidate->valid) {
+        uint8_t confidence_increment =
+            (candidate->classification == RIGHT_OBJECT_PERSON) ? 2U : 1U;
+        bool matches_track = false;
+
+        if (monitor->right_track_confidence > 0U) {
+            float track_dx = candidate->center_x - monitor->right_track_x;
+            float track_dy = candidate->center_y - monitor->right_track_y;
+            matches_track = ((track_dx * track_dx + track_dy * track_dy) <=
+                             RIGHT_TRACK_MATCH_DISTANCE_SQ);
+        }
+
+        if (matches_track) {
+            uint16_t confidence = (uint16_t)monitor->right_track_confidence +
+                                  confidence_increment;
+            monitor->right_track_confidence =
+                (confidence > 8U) ? 8U : (uint8_t)confidence;
+        } else {
+            monitor->right_track_confidence = confidence_increment;
+        }
+
+        monitor->right_track_x = candidate->center_x;
+        monitor->right_track_y = candidate->center_y;
+        monitor->right_track_in_danger = candidate->enters_danger ? 1U : 0U;
+        monitor->right_track_missed_scans = 0U;
+        monitor->last_intrusion_points = candidate->point_count;
+        monitor->right_last_danger_points = candidate->danger_point_count;
+        monitor->right_last_new_danger_points =
+            candidate->new_danger_point_count;
+        monitor->right_last_class = (uint8_t)candidate->classification;
+    } else if (monitor->right_track_confidence > 0U) {
+        if (monitor->right_track_missed_scans < 255U) {
+            monitor->right_track_missed_scans++;
+        }
+
+        if (monitor->right_track_missed_scans > RIGHT_TRACK_MAX_MISSED_SCANS) {
+            monitor->right_track_confidence = 0U;
+            monitor->right_track_in_danger = 0U;
+            monitor->last_intrusion_points = 0U;
+            monitor->right_last_danger_points = 0U;
+            monitor->right_last_new_danger_points = 0U;
+            monitor->right_last_class = (uint8_t)RIGHT_OBJECT_NONE;
+        }
+    }
+
+    monitor->right_observed_candidate =
+        (monitor->right_track_confidence > 0U) ? 1U : 0U;
+
+    if (monitor->right_track_confidence >= 2U &&
+        monitor->right_track_in_danger != 0U) {
+        return (monitor->last_intrusion_points >= RIGHT_PERSON_MIN_CLUSTER_POINTS)
+                 ? monitor->last_intrusion_points
+                 : RIGHT_PERSON_MIN_CLUSTER_POINTS;
+    }
+
+    return 0U;
+}
+
+static void SideSafety_RightResetTrack(SideSafetyMonitor_t *monitor)
+{
+    monitor->suspect_scans = 0U;
+    monitor->last_intrusion_points = 0U;
+    monitor->right_track_confidence = 0U;
+    monitor->right_track_missed_scans = 0U;
+    monitor->right_track_in_danger = 0U;
+    monitor->right_observed_candidate = 0U;
+    monitor->right_last_class = (uint8_t)RIGHT_OBJECT_NONE;
+    monitor->right_last_danger_points = 0U;
+    monitor->right_last_new_danger_points = 0U;
+    monitor->right_track_x = 0.0f;
+    monitor->right_track_y = 0.0f;
 }
 
 static uint8_t SideSafety_RightMaxIntrusionCluster(SideSafetyMonitor_t *monitor)
 {
-    uint8_t current_points = 0U;
-    uint8_t max_points = 0U;
-    float min_x = 0.0f;
-    float max_x = 0.0f;
-    float min_y = 0.0f;
-    float max_y = 0.0f;
+    RightClusterMetrics_t cluster;
+    RightCandidate_t best_candidate;
     float previous_x = 0.0f;
     float previous_y = 0.0f;
+    uint16_t start_angle;
+    uint16_t end_angle;
 
+    SideSafety_RightClusterReset(&cluster);
+    memset(&best_candidate, 0, sizeof(best_candidate));
+    if (monitor->right_track_confidence == 0U) {
+        monitor->right_last_class = (uint8_t)RIGHT_OBJECT_NONE;
+    }
     monitor->right_wall_y_mm = SideSafety_EstimateRightWallY(monitor);
+    SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
 
-    for (uint16_t angle = RIGHT_PERSON_ANGLE_MIN_DEG;
-         angle <= RIGHT_PERSON_ANGLE_MAX_DEG;
+    for (uint16_t angle = start_angle;
+         angle <= end_angle;
          angle++) {
         uint16_t current = monitor->scan_distance[angle];
         uint16_t reference = monitor->reference_distance[angle];
-        bool is_intrusion = false;
+        bool is_foreground = false;
+        bool is_new = false;
         float x = 0.0f;
         float y = 0.0f;
 
         if (current > 0U) {
             SideSafety_PolarToCartesian(angle, current, &x, &y);
-            if (x >= RIGHT_PERSON_ROI_REAR_X_MM &&
-                x <= RIGHT_PERSON_ROI_FRONT_X_MM &&
-                y >= RIGHT_PERSON_ROI_NEAR_Y_MM) {
+            y = SideSafety_NormalizeLateralY(monitor, y);
+            if (x >= RIGHT_OBSERVE_REAR_X_MM &&
+                x <= RIGHT_OBSERVE_FRONT_X_MM &&
+                y >= RIGHT_OBSERVE_NEAR_Y_MM) {
                 if (monitor->right_wall_y_mm > 0U) {
-                    is_intrusion = (y + RIGHT_PERSON_WALL_GAP_MM <=
-                                    (float)monitor->right_wall_y_mm);
-                } else if (current <= PERSON_WARN_DISTANCE_MM) {
-                    is_intrusion = ((reference > current &&
-                                     (uint16_t)(reference - current) >=
-                                         PERSON_INTRUSION_DELTA_MM) ||
-                                    (reference == 0U &&
-                                     current <= PERSON_NEW_POINT_DISTANCE_MM));
+                    is_foreground = (y + RIGHT_FOREGROUND_WALL_GAP_MM <=
+                                     (float)monitor->right_wall_y_mm);
                 }
+
+                is_new = SideSafety_RightPointIsNew(current, reference);
+                is_foreground = is_foreground || is_new;
             }
         }
 
-        if (is_intrusion) {
-            if (current_points > 0U) {
+        if (is_foreground) {
+            if (cluster.point_count > 0U) {
                 float gap_x = x - previous_x;
                 float gap_y = y - previous_y;
-                if ((gap_x * gap_x + gap_y * gap_y) > RIGHT_PERSON_POINT_GAP_SQ) {
-                    uint8_t score = SideSafety_RightClusterScore(current_points,
-                                                                  min_x,
-                                                                  max_x,
-                                                                  min_y,
-                                                                  max_y);
-                    if (score > max_points) {
-                        max_points = score;
-                    }
-                    current_points = 0U;
+                if ((gap_x * gap_x + gap_y * gap_y) >
+                    RIGHT_OBSERVE_POINT_GAP_SQ) {
+                    SideSafety_RightConsiderCluster(monitor,
+                                                     &cluster,
+                                                     &best_candidate);
+                    SideSafety_RightClusterReset(&cluster);
                 }
             }
 
-            if (current_points == 0U) {
-                min_x = max_x = x;
-                min_y = max_y = y;
-            } else {
-                if (x < min_x) min_x = x;
-                if (x > max_x) max_x = x;
-                if (y < min_y) min_y = y;
-                if (y > max_y) max_y = y;
-            }
-
-            current_points++;
+            SideSafety_RightClusterAdd(
+                &cluster,
+                x,
+                y,
+                SideSafety_RightPointInDanger(monitor, x, y),
+                is_new);
             previous_x = x;
             previous_y = y;
-        } else if (current_points > 0U) {
-            uint8_t score = SideSafety_RightClusterScore(current_points,
-                                                          min_x,
-                                                          max_x,
-                                                          min_y,
-                                                          max_y);
-            if (score > max_points) {
-                max_points = score;
-            }
-            current_points = 0U;
+        } else if (cluster.point_count > 0U) {
+            SideSafety_RightConsiderCluster(monitor,
+                                             &cluster,
+                                             &best_candidate);
+            SideSafety_RightClusterReset(&cluster);
         }
     }
 
-    if (current_points > 0U) {
-        uint8_t score = SideSafety_RightClusterScore(current_points,
-                                                      min_x,
-                                                      max_x,
-                                                      min_y,
-                                                      max_y);
-        if (score > max_points) {
-            max_points = score;
-        }
+    if (cluster.point_count > 0U) {
+        SideSafety_RightConsiderCluster(monitor,
+                                         &cluster,
+                                         &best_candidate);
     }
 
-    monitor->last_intrusion_points = max_points;
-    return max_points;
-}
-
-static uint8_t SideSafety_BackgroundMaxIntrusionRun(const SideSafetyMonitor_t *monitor)
-{
-    uint16_t start_angle;
-    uint16_t end_angle;
-    uint8_t current_run = 0U;
-    uint8_t max_run = 0U;
-    SideSafety_GetAngleRange(monitor->direction, &start_angle, &end_angle);
-
-    for (uint16_t angle = start_angle; angle <= end_angle; angle++) {
-        uint16_t current = monitor->scan_distance[angle];
-        uint16_t reference = monitor->reference_distance[angle];
-        bool is_intrusion = false;
-
-        if (current > 0U && current <= PERSON_WARN_DISTANCE_MM) {
-            if (reference > current &&
-                (uint16_t)(reference - current) >= PERSON_INTRUSION_DELTA_MM) {
-                is_intrusion = true;
-            } else if (reference == 0U &&
-                       current <= PERSON_NEW_POINT_DISTANCE_MM) {
-                is_intrusion = true;
-            }
-        }
-
-        if (is_intrusion) {
-            current_run++;
-            if (current_run > max_run) {
-                max_run = current_run;
-            }
-        } else {
-            current_run = 0U;
-        }
-    }
-
-    return max_run;
+    return SideSafety_RightUpdateTrack(monitor, &best_candidate);
 }
 
 static uint8_t SideSafety_MaxIntrusionRun(SideSafetyMonitor_t *monitor)
 {
-    if (monitor->direction == SIDE_SAFETY_RIGHT) {
-        return SideSafety_RightMaxIntrusionCluster(monitor);
-    }
-
-    monitor->last_intrusion_points = SideSafety_BackgroundMaxIntrusionRun(monitor);
-    return monitor->last_intrusion_points;
+    return SideSafety_RightMaxIntrusionCluster(monitor);
 }
 
 static uint8_t SideSafety_MinClusterPoints(const SideSafetyMonitor_t *monitor)
 {
-    return (monitor->direction == SIDE_SAFETY_RIGHT)
-             ? RIGHT_PERSON_MIN_CLUSTER_POINTS
-             : PERSON_MIN_CLUSTER_POINTS;
+    (void)monitor;
+    return RIGHT_PERSON_MIN_CLUSTER_POINTS;
 }
 
 static uint8_t SideSafety_ConfirmScanCount(const SideSafetyMonitor_t *monitor)
 {
-    return (monitor->direction == SIDE_SAFETY_RIGHT)
-             ? RIGHT_PERSON_CONFIRM_SCANS
-             : PERSON_CONFIRM_SCANS;
+    (void)monitor;
+    return RIGHT_PERSON_CONFIRM_SCANS;
 }
 
 static bool SideSafety_NewScanReady(SideSafetyMonitor_t *monitor)
@@ -745,7 +1082,9 @@ static bool SideSafety_PersonConfirmed(SideSafetyMonitor_t *monitor)
         }
     } else {
         monitor->suspect_scans = 0U;
-        SideSafety_CopyReference(monitor);
+        if (monitor->right_track_in_danger == 0U) {
+            SideSafety_CopyReference(monitor);
+        }
     }
 
     return monitor->suspect_scans >= SideSafety_ConfirmScanCount(monitor);
@@ -770,13 +1109,16 @@ static void SideSafety_WaitUntilClear(SideSafetyMonitor_t *monitor,
     Robot_Stop();
     osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
     STOP_SWEEPER();
-    if (monitor->direction == SIDE_SAFETY_RIGHT) {
-        printf("[PERSON] Right ROI intrusion confirmed (wall=%u mm, cluster=%u), stop and wait.\r\n",
-               monitor->right_wall_y_mm,
-               monitor->last_intrusion_points);
-    } else {
-        printf("[PERSON] Side intrusion confirmed, stop and wait.\r\n");
-    }
+    printf("[PERSON] %s danger-zone person/unknown confirmed "
+           "(wall=%u mm, cluster=%u, inside=%u, new=%u, "
+           "target=%.0f/%.0f mm), stop and wait.\r\n",
+           (monitor->direction == SIDE_SAFETY_LEFT) ? "Left" : "Right",
+           monitor->right_wall_y_mm,
+           monitor->last_intrusion_points,
+           monitor->right_last_danger_points,
+           monitor->right_last_new_danger_points,
+           monitor->right_track_x,
+           monitor->right_track_y);
 
     while (clear_scans < PERSON_CLEAR_SCANS) {
         osDelay(PERSON_WAIT_POLL_MS);
@@ -798,7 +1140,7 @@ static void SideSafety_WaitUntilClear(SideSafetyMonitor_t *monitor,
     }
 
     printf("[PERSON] Safety area clear, resume interrupted side sweep.\r\n");
-    monitor->suspect_scans = 0U;
+    SideSafety_RightResetTrack(monitor);
     SideSafety_CopyReference(monitor);
     SideSafety_ResumeSweep(monitor->direction, resume_command);
 }
@@ -824,7 +1166,28 @@ void AutoClimb_Process(void)
       extern UART_HandleTypeDef huart5;
       extern uint8_t ultra_rx_buf[];
 
-      osMessageQueuePut(ChassisQueueHandle, &msg_fwd, 0, 0); 
+      if (completed_regular_stairs == 0U) {
+          if (step_motor_pos > FIRST_STAIR_START_POS) {
+              printf("   -> 第一阶丝杆预下降：当前位置 %ld，目标 %d\r\n",
+                     step_motor_pos, FIRST_STAIR_START_POS);
+              stepper_cmd = -80;
+              osMessageQueuePut(StepperQueueHandle, &stepper_cmd, 0, 0);
+
+              while (step_motor_pos > FIRST_STAIR_START_POS) {
+                  printf("🔄 [第一阶准备] 丝杆位置: %ld / 目标: %d\r\n",
+                         step_motor_pos, FIRST_STAIR_START_POS);
+                  osDelay(100);
+              }
+
+              Safe_Stepper_Stop();
+              osDelay(300);
+          }
+
+          printf("   -> 第一阶阻力补偿：麦轮前进速度 %d\r\n", FIRST_STAIR_FWD_SPEED);
+          osMessageQueuePut(ChassisQueueHandle, &msg_first_stair_fwd, 0, 0);
+      } else {
+          osMessageQueuePut(ChassisQueueHandle, &msg_fwd, 0, 0);
+      }
       
       int seek_lock_counter = 0; 
       while (1) {
@@ -915,7 +1278,7 @@ void AutoClimb_Process(void)
           // =================================================================
           printf("\r\n[平台清扫] 阶段 2: 履带持续前进，直到后轮登上最后一个台阶...\r\n");
           
-          int final_climb_speed = 12000; 
+          int final_climb_speed = 12000;
           int climb_timeout_cnt = 0;   
           int valid_reach_frames = 0;  
 
@@ -1023,14 +1386,14 @@ void AutoClimb_Process(void)
           osDelay(800);
           
           // =========================================================
-          // 🌟 阶段 4：逆时针旋转 90 度
+          // 🌟 阶段 4：顺时针旋转 90 度
           // =========================================================
-          printf("\r\n🔄 [平台清扫] 阶段 4: 逆时针旋转 90 度，调整机头朝向！\r\n");
+          printf("\r\n🔄 [平台清扫] 阶段 4: 顺时针旋转 90 度，调整机头朝向！\r\n");
 
           float start_yaw = IMU_Get_Yaw() * 57.29578f;   
-          float target_yaw = start_yaw + 90.0f;     
+          float target_yaw = start_yaw - 90.0f;
 
-          if (target_yaw > 180.0f) target_yaw -= 360.0f;
+          if (target_yaw < -180.0f) target_yaw += 360.0f;
 
           float Kp = 1.3f;  
           
@@ -1044,7 +1407,7 @@ void AutoClimb_Process(void)
               int w_speed = (int)(Kp * err); 
 
               if (abs((int)err) <= 2) { 
-                  printf("✅ 逆时针 90 度掉头精准完成！最终角度: %.2f°\r\n", current_yaw);
+                  printf("✅ 顺时针 90 度转向精准完成！最终角度: %.2f°\r\n", current_yaw);
                   break;
               }
 
@@ -1090,14 +1453,14 @@ void AutoClimb_Process(void)
                   break;
               }
 
-              // --- 动作 1：麦轮右移 (融合陀螺仪纠偏) ---
-              printf("   ▶ S型: 麦轮右移 (全局航向锁定中)...\r\n");
-              START2_SWEEPER(); 
+              // --- 动作 1：麦轮左移靠墙 (融合陀螺仪纠偏) ---
+              printf("   ▶ S型: 麦轮左移靠墙 (全局航向锁定中)...\r\n");
+              START1_SWEEPER();
               int side_retry1 = 0; 
               while (1) {
-                  // 发送复合指令 (右移 + 纠偏)
+                  // 发送复合指令 (左移 + 纠偏)
                   float err = 0.0f;
-                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_right,
+                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_left,
                                                                    platform_locked_yaw,
                                                                    Kp_lateral,
                                                                    &err);
@@ -1111,16 +1474,16 @@ void AutoClimb_Process(void)
                   
                   // 🌟 队友逻辑：实时读取前方距离
                   check_dist = Lidar_Get_Min_Distance_In_Range(358, 2);
-                  printf("   -> [侧移监控] 右移... right_min=%d mm | 前方=%d mm | 角度偏离: %.2f°\r\n", right_min, check_dist, err);
+                  printf("   -> [侧移监控] 左移靠墙... left_min=%d mm | 前方=%d mm | 角度偏离: %.2f°\r\n", left_min, check_dist, err);
                   
                   // 🚨 队友逻辑：侧移撞墙紧急打断
                   if (check_dist > 0 && check_dist <= PLATFORM_FRONT_END_DIST) {
-                      printf("🚨 [紧急中断] 右移时发现前方距墙仅 %d mm，强制结束 S 型循环！\r\n", check_dist);
+                      printf("🚨 [紧急中断] 左移时发现前方距墙仅 %d mm，强制结束 S 型循环！\r\n", check_dist);
                       s_shape_finished = true;
                       break; 
                   }
 
-                  if (right_min > 0 && right_min <= LIDAR_RIGHT_WALL_MIN_DIST) break; 
+                  if (left_min > 0 && left_min <= LIDAR_LEFT_WALL_MIN_DIST) break;
               }
               osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
               osDelay(300);
@@ -1170,15 +1533,15 @@ void AutoClimb_Process(void)
                   break;
               }
 
-              // --- 动作 3：麦轮左移退回边缘 (融合陀螺仪纠偏) ---
-              printf("   ▶ S型: 麦轮左移退回边缘 (全局航向锁定中)...\r\n");
-              osMessageQueuePut(ChassisQueueHandle, &msg_left, 0, 0); 
-              START1_SWEEPER(); 
+              // --- 动作 3：麦轮右移离墙 (融合陀螺仪纠偏) ---
+              printf("   ▶ S型: 麦轮右移离墙 (全局航向锁定中)...\r\n");
+              osMessageQueuePut(ChassisQueueHandle, &msg_right, 0, 0);
+              START2_SWEEPER();
               int side_retry2 = 0; 
               while (1) {
-                  // 发送复合指令 (左移 + 纠偏)
+                  // 发送复合指令 (右移 + 纠偏)
                   float err = 0.0f;
-                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_left,
+                  ChassisMsg_t move_cmd = Build_Yaw_Locked_Command(&msg_right,
                                                                    platform_locked_yaw,
                                                                    Kp_lateral,
                                                                    &err);
@@ -1190,18 +1553,18 @@ void AutoClimb_Process(void)
                       __HAL_UART_CLEAR_FEFLAG(&huart2);
                   }
                   
-                  // 🌟 队友逻辑：左移时同样监视前方
+                  // 🌟 队友逻辑：右移时同样监视前方
                   check_dist = Lidar_Get_Min_Distance_In_Range(358, 2);
-                  printf("   -> [侧移监控] 左移... right_min=%d mm | 前方=%d mm | 角度偏离: %.2f°\r\n", right_min, check_dist, err);
+                  printf("   -> [侧移监控] 右移离墙... left_min=%d mm | 前方=%d mm | 角度偏离: %.2f°\r\n", left_min, check_dist, err);
                   
                   // 🚨 队友逻辑：侧移撞墙紧急打断
                   if (check_dist > 0 && check_dist <= PLATFORM_FRONT_END_DIST) {
-                      printf("🚨 [紧急中断] 左移时发现前方距墙仅 %d mm，强制结束 S 型循环！\r\n", check_dist);
+                      printf("🚨 [紧急中断] 右移时发现前方距墙仅 %d mm，强制结束 S 型循环！\r\n", check_dist);
                       s_shape_finished = true;
                       break; 
                   }
 
-                  if (right_min > 0 && right_min >= LIDAR_RIGHT_PLATFORM_LIMIT) break; 
+                  if (left_min > 0 && left_min >= LIDAR_LEFT_PLATFORM_LIMIT) break;
               }
               osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
               osDelay(300);
@@ -1252,16 +1615,16 @@ void AutoClimb_Process(void)
               }
           }
 					// =========================================================
-          // 🌟 阶段 6：再次逆时针旋转 90 度 (方向修正为逆时针，与阶段 4 一致！)
+          // 🌟 阶段 6：再次顺时针旋转，完成掉头
           // =========================================================
-          printf("\r\n🔄 [平台清扫结束] 阶段 6: 再次逆时针旋转 90 度，准备前往下一层...\r\n");
+          printf("\r\n🔄 [平台清扫结束] 阶段 6: 再次顺时针旋转 %.1f 度，完成掉头...\r\n",
+                 PLATFORM_FINAL_CW_TURN_DEG);
           
           start_yaw = IMU_Get_Yaw() * 57.29578f;   
           
-          // 🌟 重新改回与阶段 4 一致的 +90.0f！实现累计 180 度掉头
-          target_yaw = start_yaw + 75.0f;     
+          target_yaw = start_yaw - PLATFORM_FINAL_CW_TURN_DEG;
 
-          if (target_yaw > 180.0f) target_yaw -= 360.0f;
+          if (target_yaw < -180.0f) target_yaw += 360.0f;
 
           while (1) {
               float current_yaw = IMU_Get_Yaw() * 57.29578f;
@@ -1273,7 +1636,7 @@ void AutoClimb_Process(void)
               int w_speed = (int)(Kp * err); 
 
               if (abs((int)err) <= 2) { 
-                  printf("✅ 再次逆时针 90 度精密掉头完成！累计调转 180 度！最终角度: %.2f°\r\n", current_yaw);
+                  printf("✅ 第二次顺时针转向完成！最终角度: %.2f°\r\n", current_yaw);
                   break;
               }
 
@@ -1288,7 +1651,7 @@ void AutoClimb_Process(void)
                   if (w_speed <= 0 && w_speed > -8) w_speed = -8;
               }
 
-              // 负号喂给底盘以维持逆时针旋转
+              // 目标角度减小后，-w_speed 会给出顺时针旋转命令。
               ChassisMsg_t msg_turn = {0, 0, -w_speed};
               osMessageQueuePut(ChassisQueueHandle, &msg_turn, 0, 0);
               
@@ -1430,18 +1793,41 @@ void AutoClimb_Process(void)
 
       // 普通台阶左右清扫共用同一个基准航向，停车或换向后不重新锁定。
       float stair_locked_yaw = IMU_Get_Yaw();
-      float stair_lateral_kp = 2.0f;
+      float stair_lateral_kp = STAIR_LATERAL_YAW_KP;
       int stair_yaw_last_w = 0;
       printf("🎯 [普通台阶航向锁定] 左右移动基准角度: %.2f°\r\n", stair_locked_yaw);
        
       // ==========================================================
-      printf("▶ 动作 5: 麦轮开始左移...\r\n");
-      START1_SWEEPER(); 
+      printf("▶ 动作 5: 麦轮开始右移（远离左墙）...\r\n");
+      START2_SWEEPER();
+      
+      while (right_min > LIDAR_RIGHT_STOP_DIST || right_min <= 0) {
+          float yaw_error = 0.0f;
+          ChassisMsg_t move_cmd = Build_Stair_Yaw_Locked_Command(&msg_stair_right,
+                                                                 stair_locked_yaw,
+                                                                 stair_lateral_kp,
+                                                                 &stair_yaw_last_w,
+                                                                 &yaw_error);
+          osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
+          printf("🎯 [雷达监控-右侧离墙] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
+                 right_min, yaw_error);
+          osDelay(100); 
+      }
+      
+      printf("✅ 雷达右侧达标(%d mm)，停止右移。\r\n", right_min);
+      osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
+      osDelay(500); 
+      STOP_SWEEPER(); 
+      stair_yaw_last_w = 0;
+
+      // ==========================================================
+      printf("▶ 动作 7: 麦轮开始左移（靠近左墙，启用人腿演示）...\r\n");
+      START1_SWEEPER();
 #if ENABLE_STAIR_LEFT_PERSON_SAFETY
       SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_LEFT);
 #endif
       
-      while (left_min > LIDAR_LEFT_STOP_DIST || left_min <= 0) { 
+      while (left_min > LIDAR_LEFT_STOP_DIST || left_min <= 0) {
           float yaw_error = 0.0f;
           ChassisMsg_t move_cmd = Build_Stair_Yaw_Locked_Command(&msg_stair_left,
                                                                  stair_locked_yaw,
@@ -1452,8 +1838,16 @@ void AutoClimb_Process(void)
 #if ENABLE_STAIR_LEFT_PERSON_SAFETY
           SideSafety_Process(&side_safety_monitor, &move_cmd);
 #endif
-          printf("🎯 [雷达监控-左侧] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
-                 left_min, yaw_error);
+          printf("🎯 [雷达监控-左侧靠墙] 当前距离: %d mm | 航向偏差: %.2f° "
+                 "| 目标:%u 跟踪:%u 危险:%u 区内:%u 新增:%u 墙:%u mm\r\n",
+                 left_min,
+                 yaw_error,
+                 (unsigned int)side_safety_monitor.right_last_class,
+                 (unsigned int)side_safety_monitor.right_track_confidence,
+                 (unsigned int)side_safety_monitor.right_track_in_danger,
+                 (unsigned int)side_safety_monitor.right_last_danger_points,
+                 (unsigned int)side_safety_monitor.right_last_new_danger_points,
+                 (unsigned int)side_safety_monitor.right_wall_y_mm);
           osDelay(100); 
       }
       
@@ -1461,31 +1855,10 @@ void AutoClimb_Process(void)
       osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
       osDelay(500); 
       STOP_SWEEPER(); 
-      stair_yaw_last_w = 0;
 
-      // ==========================================================
-      printf("▶ 动作 7: 麦轮开始右移...\r\n");
-      START2_SWEEPER(); 
-      SideSafety_Init(&side_safety_monitor, SIDE_SAFETY_RIGHT);
-      
-      while (right_min > LIDAR_RIGHT_STOP_DIST || right_min <= 0) { 
-          float yaw_error = 0.0f;
-          ChassisMsg_t move_cmd = Build_Stair_Yaw_Locked_Command(&msg_stair_right,
-                                                                 stair_locked_yaw,
-                                                                 stair_lateral_kp,
-                                                                 &stair_yaw_last_w,
-                                                                 &yaw_error);
-          osMessageQueuePut(ChassisQueueHandle, &move_cmd, 0, 0);
-          SideSafety_Process(&side_safety_monitor, &move_cmd);
-          printf("🎯 [雷达监控-右侧] 当前距离: %d mm | 航向偏差: %.2f°\r\n",
-                 right_min, yaw_error);
-          osDelay(100); 
+      if (completed_regular_stairs < 255U) {
+          completed_regular_stairs++;
       }
-      
-      printf("✅ 雷达右侧达标(%d mm)，停止右移。\r\n", right_min);
-      osMessageQueuePut(ChassisQueueHandle, &msg_stop, 0, 0);
-      osDelay(500); 
-      STOP_SWEEPER(); 
-
-      printf("🎉 单级台阶循环完成！\r\n");
+      printf("🎉 单级台阶循环完成！已完成普通台阶: %u\r\n",
+             (unsigned int)completed_regular_stairs);
 }

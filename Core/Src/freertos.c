@@ -542,7 +542,7 @@ void StartStepperTask(void *argument)
 	uint32_t last_ultra_trig_time = 0; // 🌟 新增：超声波触发限速器
 	
   #define MOTOR_MIN_LIMIT    -80000       
-  #define MOTOR_MAX_LIMIT    2120000 
+  #define MOTOR_MAX_LIMIT    2180000
 
   for(;;)
   {
@@ -685,7 +685,7 @@ void StartAutoClimbTask(void *argument)
 void StartSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartSensorTask */
-  uint32_t last_send_time = 0; 
+  uint32_t last_send_time = 0;
   extern void Compress_And_Send_Lidar_Data(void); 
   extern uint16_t Lidar_Get_Min_Distance_In_Range(uint16_t start_angle, uint16_t end_angle);
   
@@ -701,7 +701,7 @@ void StartSensorTask(void *argument)
   for(;;)
   {
       // 🌟 核心修复 1：将 osWaitForever 改为 500！500ms 没收到数据说明雷达死了！
-      if (osSemaphoreAcquire(Sem_SensorRxHandle, 500) == osOK) 
+      if (osSemaphoreAcquire(Sem_SensorRxHandle, 500) == osOK)
       {
           // === 雷达解包核心逻辑 ===
           while (Lidar_ReadIndex != Lidar_WriteIndex)
